@@ -1,0 +1,22 @@
+.runtime/
+.state/
+frontend/node_modules
+frontend/*.tsbuildinfo
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+*.log
+.env
+.env.*
+*.pem
+*.key
+
+# Machine-generated reports can contain local paths, hardware identifiers,
+# prompts, profile names, and performance history.
+runtime-locks/cuda-smoke.json
+runtime-locks/environment.json
+runtime-locks/exl3-freeze.txt
+validation/*.json
+validation/*.png
+validation/DEEPSEEK_CPU_COMPARISON.md

@@ -1,0 +1,22 @@
+diff --git a/backends/exllamav3/model.py b/backends/exllamav3/model.py
+index 57e750b..3750cf5 100644
+--- a/backends/exllamav3/model.py
++++ b/backends/exllamav3/model.py
+@@ -660,6 +660,17 @@ class ExllamaV3Container:
+             model_params.prompt_template = self.prompt_template.name
+             model_params.prompt_template_content = self.prompt_template.raw_template
+ 
++        # Expose the loaded component so clients can verify MTP readiness.
++        if self.use_draft_model and self.draft_model is not None:
++            model_params.draft = ModelCard(
++                id=self.draft_model_dir.name,
++                parameters=ModelCardParameters(
++                    cache_size=self.cache_size,
++                    cache_mode=self.draft_cache_mode,
++                    max_seq_len=self.max_seq_len,
++                ),
++            )
++
+         model_card = ModelCard(
+             id=self.model_dir.name,
+             parameters=model_params,
