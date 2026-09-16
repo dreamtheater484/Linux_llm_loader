@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import struct
 
+from .reasoning import inspect_reasoning, native_reasoning
+
 
 def read_json(path):
     return json.loads(path.read_text(encoding='utf-8'))
@@ -65,7 +67,7 @@ def gguf_metadata(path):
         result = {}
         for _ in range(count):
             key = string()
-            keep = key in ('general.architecture', 'general.name', 'general.type', 'split.count', 'split.no') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count'))
+            keep = key in ('general.architecture', 'general.name', 'general.type', 'split.count', 'split.no', 'tokenizer.chat_template') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count'))
             result_value = value(unpack('<I'), keep)
             if keep:
                 result[key] = result_value
@@ -125,7 +127,7 @@ def native_model(path, root):
                     issues.append('Receipt mismatch: ' + item['name'])
             break
     return dict(path=str(path), name=path.name, format='EXL3' if method == 'exl3' else 'Safetensors',
-                quant=quant_label, architecture=architecture,
+                quant=quant_label, architecture=architecture, reasoning=native_reasoning(path, method == 'exl3'),
                 context=text.get('max_position_embeddings', 4096), vision=vision, mtp=mtp,
                 draft_limit=min(16, max(1, int(text.get('dspark_block_size', 4)))),
                 experts=text.get('num_experts', text.get('n_routed_experts', 0)),
@@ -176,7 +178,7 @@ def scan(root):
                         projector = str(root / filename)
                 models.append(dict(path=str(path), name=path.name[:match.start()] if match else path.stem,
                     format='GGUF', quant=next(iter(re.findall(r'(?:UD-)?(?:IQ|Q|MXFP|NVFP)[\w.]+', path.stem)), 'Mixed'),
-                    architecture=arch, context=meta.get(arch + '.context_length', 4096),
+                    architecture=arch, context=meta.get(arch + '.context_length', 4096), reasoning=inspect_reasoning(meta.get('tokenizer.chat_template', '')),
                     vision=bool(projector), mtp=False, experts=0, layers=meta.get(arch + '.block_count', 0),
                     draft_limit=4,
                     ngram=False, bytes=sum(p.stat().st_size for p in shards if p.is_file()), issues=issues,

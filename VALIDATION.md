@@ -18,6 +18,7 @@ The suite covers:
 - process cancellation and local request controls;
 - telemetry parsing and unavailable sensors;
 - profile creation, editing, deletion, and restoration;
+- template-specific reasoning choices, legacy profile migration, matching token-count/generation controls, and changing effort per request without changing loaded settings;
 - Windows model-download planning, resumption, integrity checks, and bounded failures.
 
 The Windows-only PowerShell integration test is skipped on Linux. Local HTTP transfer tests use a temporary loopback server and do not download models.
@@ -61,6 +62,7 @@ Results are stored under the private runtime state directory. Reports created by
 - The chat follows streamed output until the user scrolls away, then resumes through **Jump to latest**.
 - Text paste remains text; screenshot paste creates a removable image preview for vision models.
 - Profiles can be named, loaded, edited, copied, deleted, undone, and restored.
+- Change Thinking between Off, Model default and native levels while a model is loaded. The next request uses the selected level without requiring a reload; profiles and copied configuration retain it. Thinking and the final answer share Maximum output.
 - Errors remain readable and the interface stays usable after a failed model load.
 - Desktop and narrow layouts have no horizontal overflow and retain keyboard-visible focus.
 - Hardware and performance fields show unavailable data as unavailable rather than estimating it.

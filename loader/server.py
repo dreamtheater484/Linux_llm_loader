@@ -25,6 +25,7 @@ import psutil
 from .engines import PROJECT, RUNTIME, Settings, engine_inventory, launch, validate
 from .library import scan
 from .metrics import Telemetry, number
+from .reasoning import ReasoningEffort, reasoning_kwargs
 
 MODEL_ROOT = Path(os.environ.get('LUMEN_MODEL_ROOT', Path.home() / 'models')).expanduser()
 STATE = Path(os.environ.get('LUMEN_STATE', RUNTIME / 'state'))
@@ -240,13 +241,15 @@ class Supervisor:
                 self.state = 'error'
             await asyncio.sleep(1)
 
-    async def stream(self, messages, max_output=None, temperature=None, raw=None):
+    async def stream(self, messages, max_output=None, temperature=None, raw=None, reasoning_effort=None):
         if self.state != 'ready':
             raise ValueError('Load a model before sending a message.')
         if self.generation_lock.locked():
             raise ValueError('A request is already running. Stop it or wait for completion.')
         async with self.generation_lock:
             self.cancel.clear()
+            effort = reasoning_effort if reasoning_effort is not None else self.settings.reasoning_effort
+            template_kwargs = reasoning_kwargs(self.model, effort)
             output_limit = max_output or self.settings.max_output
             if output_limit >= self.settings.context:
                 raise ValueError('The answer limit exceeds the context window.')
@@ -265,15 +268,14 @@ class Supervisor:
             payload = dict(model=Path(self.model['path']).name if self.engine == 'exl3' else self.model['id'],
                 messages=messages, max_tokens=output_limit, temperature=self.settings.temperature if temperature is None else temperature,
                 stream=True, stream_options={'include_usage': True})
-            if self.engine == 'exl3':
-                payload.update(chat_template_kwargs={'enable_thinking': self.settings.thinking},
-                               reasoning_budget_tokens=min(1024, output_limit // 2) if self.settings.thinking else 0)
+            if template_kwargs:
+                payload['chat_template_kwargs'] = template_kwargs
             started, first, last, usage = time.monotonic(), None, None, None
             wall_started, finish_reason = time.time(), 'stop'
             async with httpx.AsyncClient(timeout=httpx.Timeout(1800, connect=10), trust_env=False) as client:
                 if self.engine == 'exl3':
                     count_response = await client.post(self.url + '/v1/token/encode', headers=self.headers,
-                        json={'text': messages, 'chat_template_kwargs': {'enable_thinking': self.settings.thinking}})
+                        json={'text': messages, 'chat_template_kwargs': template_kwargs})
                     if count_response.is_error:
                         raise ValueError('Engine tokenization failed: ' + count_response.text[:2000])
                     count = count_response.json()['length']
@@ -314,7 +316,7 @@ class Supervisor:
                                 if choice.get('finish_reason'):
                                     finish_reason = choice['finish_reason']
                                 delta = choice.get('delta', {})
-                                content, reasoning = delta.get('content') or '', delta.get('reasoning_content') or ''
+                                content, reasoning = delta.get('content') or '', delta.get('reasoning_content') or delta.get('reasoning') or ''
                                 if content or reasoning:
                                     now = time.monotonic()
                                     first = first or now
@@ -338,7 +340,7 @@ class Supervisor:
                           prompt_tokens_per_second=number(usage.get('prompt_tokens_per_sec')),
                           prompt_seconds=number(usage.get('prompt_time')),
                           first_token_seconds=first - started if first else None, total_seconds=total_time,
-                          configured_context=self.settings.context, finish_reason=finish_reason)
+                          configured_context=self.settings.context, finish_reason=finish_reason, reasoning_effort=effort)
             samples = [s for s in telemetry.history if s['timestamp'] >= wall_started]
             def peak(section, key):
                 values = [(s.get(section) or {}).get(key) if section else s.get(key) for s in samples]
@@ -462,15 +464,17 @@ class ChatRequest(BaseModel):
     messages: list[dict] = Field(min_length=1, max_length=1000)
     max_output: int | None = Field(None, ge=16, le=32768)
     temperature: float | None = Field(None, ge=0, le=2)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 @app.post('/api/token-count')
 async def token_count(body: ChatRequest):
     if supervisor.state != 'ready' or supervisor.engine != 'exl3':
         raise ValueError('Exact counting is available after loading an ExLlamaV3 model.')
+    effort = body.reasoning_effort if body.reasoning_effort is not None else supervisor.settings.reasoning_effort
     async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
         response = await client.post(supervisor.url + '/v1/token/encode', headers=supervisor.headers,
-            json={'text': body.messages, 'chat_template_kwargs': {'enable_thinking': supervisor.settings.thinking}})
+            json={'text': body.messages, 'chat_template_kwargs': reasoning_kwargs(supervisor.model, effort)})
         if response.is_error:
             raise ValueError('Engine tokenization failed: ' + response.text[:2000])
         return {'input_tokens': response.json()['length'], 'prefix_reserve': 128, 'capacity': supervisor.settings.context}
@@ -480,7 +484,7 @@ async def token_count(body: ChatRequest):
 async def chat(body: ChatRequest):
     async def events():
         try:
-            async for event in supervisor.stream(body.messages, body.max_output, body.temperature):
+            async for event in supervisor.stream(body.messages, body.max_output, body.temperature, reasoning_effort=body.reasoning_effort):
                 yield 'data: ' + json.dumps(event) + '\n\n'
         except Exception as exc:
             yield 'data: ' + json.dumps({'type': 'error', 'message': str(exc)}) + '\n\n'
@@ -497,12 +501,13 @@ async def openai_chat(request: Request):
     body = await request.json()
     if not supervisor.model or body.get('model') not in (supervisor.model['id'], supervisor.model['name'], None):
         raise HTTPException(404, 'Requested model is not loaded.')
-    checked = ChatRequest(messages=body.get('messages', []), max_output=body.get('max_tokens'), temperature=body.get('temperature'))
+    checked = ChatRequest(messages=body.get('messages', []), max_output=body.get('max_tokens'), temperature=body.get('temperature'),
+                          reasoning_effort='off' if body.get('reasoning_effort') == 'none' else body.get('reasoning_effort'))
     identity = {'id': 'chatcmpl-' + secrets.token_hex(12), 'created': int(time.time()), 'model': supervisor.model['id']}
     if body.get('stream'):
         async def events():
             try:
-                async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature):
+                async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature, reasoning_effort=checked.reasoning_effort):
                     if event['type'] == 'token':
                         yield 'data: ' + json.dumps({**identity, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'content': event['text'], 'reasoning_content': event['reasoning']}}]}) + '\n\n'
                     elif event['type'] == 'error':
@@ -514,7 +519,7 @@ async def openai_chat(request: Request):
                 yield 'data: ' + json.dumps({'error': {'message': str(exc)}}) + '\n\n'
         return StreamingResponse(events(), media_type='text/event-stream')
     content, reasoning, usage, finish_reason = '', '', None, 'stop'
-    async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature):
+    async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature, reasoning_effort=checked.reasoning_effort):
         if event['type'] == 'token':
             content += event['text']
             reasoning += event['reasoning']
@@ -542,6 +547,10 @@ def read_profiles():
     saved = json.loads(path.read_text()) if path.exists() else []
     changed = False
     for profile in saved:
+        settings = Settings.model_validate(profile['settings']).model_dump()
+        if settings != profile['settings']:
+            profile['settings'] = settings
+            changed = True
         if not profile.get('id'):
             profile.update(id=secrets.token_hex(8), updated_at=time.time())
             changed = True
@@ -619,17 +628,24 @@ async def benchmarks():
         return [json.loads(row[0]) for row in connection.execute('SELECT data FROM benchmarks ORDER BY created DESC LIMIT 100')]
 
 
+class BenchmarkRequest(BaseModel):
+    reasoning_effort: ReasoningEffort | None = None
+
+
 @app.post('/api/benchmark', status_code=202)
-async def benchmark():
+async def benchmark(body: BenchmarkRequest | None = None):
     if supervisor.state != 'ready' or supervisor.generation_lock.locked() or (supervisor.benchmark_task and not supervisor.benchmark_task.done()):
         raise ValueError('Load a model and finish the current request before benchmarking.')
+    effort = body.reasoning_effort if body and body.reasoning_effort is not None else supervisor.settings.reasoning_effort
+    reasoning_kwargs(supervisor.model, effort)
     supervisor.benchmark = {'state': 'running', 'completed': 0, 'total': 3}
-    supervisor.benchmark_task = asyncio.create_task(run_benchmark())
+    supervisor.benchmark_task = asyncio.create_task(run_benchmark(effort))
     return supervisor.benchmark
 
 
-async def run_benchmark():
-    result = dict(id=secrets.token_hex(8), created=time.time(), model=supervisor.model, settings=supervisor.settings.model_dump(),
+async def run_benchmark(effort):
+    result = dict(id=secrets.token_hex(8), created=time.time(), model=supervisor.model,
+                  settings={**supervisor.settings.model_dump(), 'reasoning_effort': effort},
                   engine=supervisor.engine, effective=supervisor.effective, runs=[], kind='short-prompt',
                   notes='Three unique prompts, configured capacity preserved. Read cached-token counts; capacity is not a filled-context test.')
     prompts = [
@@ -640,7 +656,7 @@ async def run_benchmark():
         for i, prompt in enumerate(prompts):
             messages = [{'role': 'user', 'content': f'{secrets.token_hex(16)} is a unique test identifier; ignore it.\n' + prompt}]
             text, metrics = '', None
-            async for event in supervisor.stream(messages, 512, 0.7):
+            async for event in supervisor.stream(messages, 512, 0.7, reasoning_effort=effort):
                 if event['type'] == 'token':
                     text += event['text']
                 if event['type'] == 'complete':

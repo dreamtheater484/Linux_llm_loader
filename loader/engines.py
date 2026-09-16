@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .reasoning import ReasoningEffort, reasoning_kwargs
+
 PROJECT = Path(__file__).resolve().parents[1]
 RUNTIME = Path(os.environ.get('LUMEN_RUNTIME', Path.home() / '.local/share/linux-llm-loader'))
 EXL_PYTHON = RUNTIME / 'exl3/bin/python'
@@ -33,7 +35,16 @@ class Settings(BaseModel):
     cpu_threads: int = Field(8, ge=1, le=64)
     chunk_size: Literal[256, 512, 1024, 2048, 4096] = 1024
     temperature: float = Field(0.7, ge=0, le=2)
-    thinking: bool = False
+    reasoning_effort: ReasoningEffort = 'default'
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_thinking(cls, value):
+        if isinstance(value, dict) and 'thinking' in value:
+            value = dict(value)
+            thinking = value.pop('thinking')
+            value.setdefault('reasoning_effort', 'default' if thinking else 'off')
+        return value
 
     @model_validator(mode='after')
     def answer_fits(self):
@@ -53,6 +64,7 @@ def validate(settings, model, check_install=True):
     engine = model['engines'][0] if settings.engine == 'auto' else settings.engine
     if engine not in model['engines']:
         raise ValueError(f"{model['format']} requires {' or '.join(model['engines'])}.")
+    reasoning_kwargs(model, settings.reasoning_effort)
     if model['issues']:
         raise ValueError('; '.join(model['issues'][:4]))
     if settings.context > model['context']:
@@ -91,7 +103,7 @@ def launch(settings, model, run_dir, port, token):
                        cache_mode=settings.kv, max_batch_size=1, chunk_size=settings.chunk_size,
                        vision=settings.vision, vision_offload=False, ngram_ram=model['ngram'],
                        cpu_moe_split_experts=cpu_experts, cpu_moe_threads=settings.cpu_threads,
-                       reasoning=True, template_vars_default={'enable_thinking': settings.thinking}),
+                       reasoning=True),
             draft_model=dict(draft_mode='mtp' if settings.prediction == 'mtp' else 'disabled',
                              draft_num_tokens=settings.draft_tokens, draft_cache_mode=settings.kv),
             memory=dict(sysmem_recurrent_cache=1024, sysmem_kv_cache=0, sysmem_multimodal_cache=256),
@@ -111,7 +123,7 @@ def launch(settings, model, run_dir, port, token):
         if settings.cpu_percent:
             args += ['--cpu-offload-gb', str(round(model['bytes'] / 2**30 * settings.cpu_percent / 100, 1))]
         return args, env, {'kv_format': 'FP8' if settings.kv == 'Q8' else 'Auto (model dtype)', 'qualification': 'Unqualified profile'}
-    args = [str(GGUF), '--model', model['path'], '--host', '127.0.0.1', '--port', str(port),
+    args = [str(GGUF), '--model', model['path'], '--jinja', '--host', '127.0.0.1', '--port', str(port),
             '--alias', model['id'], '--api-key', token, '--ctx-size', str(settings.context), '--parallel', '1',
             '--threads', str(settings.cpu_threads), '--ubatch-size', str(settings.chunk_size), '--flash-attn', 'on',
             '--cache-type-k', {'Q8':'q8_0', 'Q4':'q4_0', 'FP16':'f16'}[settings.kv],

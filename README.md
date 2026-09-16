@@ -129,6 +129,12 @@ The device path is written only to `~/.config/lumen/config.json`; it is never ad
 
 The conversation follows new output automatically. Scrolling away pauses tail following; **Jump to latest** resumes it. Closing the browser tab leaves the local server running. **Unload model** frees model RAM and VRAM. **Quit Lumen** stops the server.
 
+The **Thinking** selector above the message box applies to the next message, even after loading the model. **Model default** leaves reasoning to the checkpoint's chat template; **Off** and native effort levels appear only when identified in that template. The current Qwen3.8 Flash Next template offers Low, Medium and Extra high (default); both DeepSeek V4 Flash templates offer Low (default), High and Max. Other checkpoints may offer different choices. Effort levels are model instructions, not fixed token budgets.
+
+There is no separate 1K thinking cap. **Maximum output** limits thinking and the final answer together, so increase it for longer reasoning. An output-limit notice explains when generation stops at that limit. Saved profiles include the selected effort; older profiles retain Off if thinking was disabled, while previously enabled thinking becomes Model default. Changing effort does not change GPU placement or reload weights, although a changed prompt prefix may reduce prompt-cache reuse.
+
+API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, or `/v1/chat/completions`. Use `default`, `off` (or OpenAI's `none` alias on the `/v1` route), or a native level listed by the model's `reasoning.options` in `/api/library`. Omitting it uses the loaded profile's saved choice. Unsupported levels are rejected; the same template variables are used for token counting and generation. vLLM and llama.cpp integrations remain unqualified until tested with their installed engine/checkpoint versions. Their request template controls are documented by [vLLM](https://docs.vllm.ai/en/latest/features/reasoning_outputs/) and [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
 ## Model and engine support
 
 | Format | Engine | Status |
