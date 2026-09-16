@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .reasoning import ReasoningEffort, reasoning_kwargs
+from .tool_calls import native_tool_format
 
 PROJECT = Path(__file__).resolve().parents[1]
 RUNTIME = Path(os.environ.get('LUMEN_RUNTIME', Path.home() / '.local/share/linux-llm-loader'))
@@ -108,6 +109,9 @@ def launch(settings, model, run_dir, port, token):
                              draft_num_tokens=settings.draft_tokens, draft_cache_mode=settings.kv),
             memory=dict(sysmem_recurrent_cache=1024, sysmem_kv_cache=0, sysmem_multimodal_cache=256),
             sampling=dict(override_preset=None))
+        tool_format = native_tool_format(model)
+        if tool_format:
+            config['model'].update(tool_format=tool_format, tool_calls_in_reasoning=False)
         (run_dir / 'config.yml').write_text(yaml.safe_dump(config), encoding='utf-8')
         key_file = run_dir / 'api_tokens.yml'
         key_file.write_text(yaml.safe_dump({'api_key': token, 'admin_key': token}), encoding='utf-8')

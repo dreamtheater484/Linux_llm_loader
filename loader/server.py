@@ -26,6 +26,7 @@ from .engines import PROJECT, RUNTIME, Settings, engine_inventory, launch, valid
 from .library import scan
 from .metrics import Telemetry, number
 from .reasoning import ReasoningEffort, reasoning_kwargs
+from .tool_calls import ToolRequest, ToolCallAccumulator, ToolResponseError, validate_tool_history
 
 MODEL_ROOT = Path(os.environ.get('LUMEN_MODEL_ROOT', Path.home() / 'models')).expanduser()
 STATE = Path(os.environ.get('LUMEN_STATE', RUNTIME / 'state'))
@@ -90,6 +91,7 @@ class Supervisor:
         self.benchmark_task = None
         self.benchmark = None
         self.last_usage = None
+        self.tool_format = None
 
     async def refresh(self):
         self.inventory = await asyncio.to_thread(scan, MODEL_ROOT)
@@ -105,7 +107,9 @@ class Supervisor:
                     effective=self.effective, engine=self.engine, started=self.started,
                     elapsed_seconds=round(time.time() - self.started, 1) if self.started else 0,
                     latest_log=self.logs[-1] if self.logs else None, last_usage=self.last_usage,
-                    busy=self.generation_lock.locked(), benchmark=self.benchmark)
+                    busy=self.generation_lock.locked(), benchmark=self.benchmark,
+                    tool_calling={'enabled': bool(self.tool_format), 'format': self.tool_format,
+                                  'choices': ['auto', 'none'] if self.tool_format else ['none']})
 
     async def stop(self):
         async with self.operation:
@@ -125,6 +129,7 @@ class Supervisor:
         await self._terminate()
         self.state, self.error = 'idle', None
         self.model = self.settings = self.effective = self.engine = self.started = None
+        self.tool_format = None
 
     async def _terminate(self):
         proc = self.proc
@@ -190,6 +195,7 @@ class Supervisor:
                 self.port = sock.getsockname()[1]
             self.token = secrets.token_urlsafe(32)
             args, env, requested = launch(self.settings, self.model, run_dir, self.port, self.token)
+            self.tool_format = requested.get('model', {}).get('tool_format') if self.engine == 'exl3' else None
             save_json(run_dir / 'profile.json', self.settings.model_dump())
             self.proc = await asyncio.create_subprocess_exec(*args, cwd=run_dir, env=env, start_new_session=True,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=2**20)
@@ -241,41 +247,51 @@ class Supervisor:
                 self.state = 'error'
             await asyncio.sleep(1)
 
-    async def stream(self, messages, max_output=None, temperature=None, raw=None, reasoning_effort=None):
+    def check_request(self, messages, max_output=None, reasoning_effort=None, tool_request=None):
         if self.state != 'ready':
             raise ValueError('Load a model before sending a message.')
         if self.generation_lock.locked():
-            raise ValueError('A request is already running. Stop it or wait for completion.')
+            raise HTTPException(409, 'A request is already running. Wait for completion.')
+        effort = reasoning_effort if reasoning_effort is not None else self.settings.reasoning_effort
+        template_kwargs = reasoning_kwargs(self.model, effort)
+        output_limit = max_output or self.settings.max_output
+        if output_limit >= self.settings.context:
+            raise ValueError('The answer limit exceeds the context window.')
+        tool_payload = (tool_request or ToolRequest()).tool_payload(self.engine, self.tool_format)
+        validate_tool_history(messages)
+        for message in messages:
+            content = message.get('content')
+            if isinstance(content, list):
+                for part in content:
+                    if part.get('type') == 'image_url':
+                        if not self.settings.vision:
+                            raise ValueError('Reload with vision enabled before adding an image.')
+                        url = part.get('image_url', {}).get('url', '')
+                        if not url.startswith(('data:image/png;base64,', 'data:image/jpeg;base64,', 'data:image/webp;base64,')):
+                            raise ValueError('Use an uploaded PNG, JPEG or WebP image.')
+                        if len(url) > 16_000_000:
+                            raise ValueError('Image exceeds the 12 MB upload limit.')
+        return effort, template_kwargs, output_limit, tool_payload
+
+    async def stream(self, messages, max_output=None, temperature=None, raw=None, reasoning_effort=None, tool_request=None):
+        effort, template_kwargs, output_limit, tool_payload = self.check_request(messages, max_output, reasoning_effort, tool_request)
         async with self.generation_lock:
             self.cancel.clear()
-            effort = reasoning_effort if reasoning_effort is not None else self.settings.reasoning_effort
-            template_kwargs = reasoning_kwargs(self.model, effort)
-            output_limit = max_output or self.settings.max_output
-            if output_limit >= self.settings.context:
-                raise ValueError('The answer limit exceeds the context window.')
-            for message in messages:
-                content = message.get('content')
-                if isinstance(content, list):
-                    for part in content:
-                        if part.get('type') == 'image_url':
-                            if not self.settings.vision:
-                                raise ValueError('Reload with vision enabled before adding an image.')
-                            url = part.get('image_url', {}).get('url', '')
-                            if not url.startswith(('data:image/png;base64,', 'data:image/jpeg;base64,', 'data:image/webp;base64,')):
-                                raise ValueError('Use an uploaded PNG, JPEG or WebP image.')
-                            if len(url) > 16_000_000:
-                                raise ValueError('Image exceeds the 12 MB upload limit.')
             payload = dict(model=Path(self.model['path']).name if self.engine == 'exl3' else self.model['id'],
                 messages=messages, max_tokens=output_limit, temperature=self.settings.temperature if temperature is None else temperature,
-                stream=True, stream_options={'include_usage': True})
+                stream=True, stream_options={'include_usage': True}, **tool_payload)
             if template_kwargs:
                 payload['chat_template_kwargs'] = template_kwargs
+            count_kwargs = {**template_kwargs}
+            if tool_payload.get('tools'):
+                count_kwargs['tools'] = tool_payload['tools']
+            calls = ToolCallAccumulator()
             started, first, last, usage = time.monotonic(), None, None, None
             wall_started, finish_reason = time.time(), 'stop'
             async with httpx.AsyncClient(timeout=httpx.Timeout(1800, connect=10), trust_env=False) as client:
                 if self.engine == 'exl3':
                     count_response = await client.post(self.url + '/v1/token/encode', headers=self.headers,
-                        json={'text': messages, 'chat_template_kwargs': template_kwargs})
+                        json={'text': messages, 'chat_template_kwargs': count_kwargs})
                     if count_response.is_error:
                         raise ValueError('Engine tokenization failed: ' + count_response.text[:2000])
                     count = count_response.json()['length']
@@ -313,9 +329,13 @@ class Supervisor:
                             if event.get('usage'):
                                 usage = event['usage']
                             for choice in event.get('choices', []):
+                                if choice.get('index', 0) != 0:
+                                    raise ValueError('This server supports one completion choice per request.')
                                 if choice.get('finish_reason'):
                                     finish_reason = choice['finish_reason']
                                 delta = choice.get('delta', {})
+                                if delta.get('tool_calls') is not None:
+                                    calls.add(delta['tool_calls'])
                                 content, reasoning = delta.get('content') or '', delta.get('reasoning_content') or delta.get('reasoning') or ''
                                 if content or reasoning:
                                     now = time.monotonic()
@@ -329,6 +349,14 @@ class Supervisor:
                                 await pending
             if not usage:
                 raise ValueError('The engine closed the response without token usage; this run has no verified speed measurement.')
+            validated_calls = calls.finish(tool_payload, finish_reason)
+            if validated_calls:
+                now = time.monotonic()
+                first = first or now
+                last = now
+                # Native Tabby emits complete calls at the end of the turn. Buffer
+                # fragmented engines too: validate all calls before exposing any.
+                yield {'type': 'tool_calls', 'tool_calls': validated_calls}
             total_time = time.monotonic() - started
             tokens = usage.get('completion_tokens', 0)
             speed = usage.get('completion_tokens_per_sec')
@@ -411,6 +439,11 @@ async def value_error(request, exc):
     return JSONResponse({'detail': str(exc)}, status_code=422)
 
 
+@app.exception_handler(ToolResponseError)
+async def tool_response_error(request, exc):
+    return JSONResponse({'error': {'message': str(exc), 'type': 'invalid_upstream_tool_call'}}, status_code=502)
+
+
 @app.get('/api/status')
 async def status():
     return {'session': supervisor.snapshot(), 'hardware': telemetry.value, 'engines': engine_inventory()}
@@ -460,7 +493,7 @@ async def logs():
     return {'lines': list(supervisor.logs)}
 
 
-class ChatRequest(BaseModel):
+class ChatRequest(ToolRequest):
     messages: list[dict] = Field(min_length=1, max_length=1000)
     max_output: int | None = Field(None, ge=16, le=32768)
     temperature: float | None = Field(None, ge=0, le=2)
@@ -472,9 +505,14 @@ async def token_count(body: ChatRequest):
     if supervisor.state != 'ready' or supervisor.engine != 'exl3':
         raise ValueError('Exact counting is available after loading an ExLlamaV3 model.')
     effort = body.reasoning_effort if body.reasoning_effort is not None else supervisor.settings.reasoning_effort
+    tool_payload = body.tool_payload(supervisor.engine, supervisor.tool_format)
+    validate_tool_history(body.messages)
+    template_kwargs = reasoning_kwargs(supervisor.model, effort)
+    if tool_payload.get('tools'):
+        template_kwargs['tools'] = tool_payload['tools']
     async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
         response = await client.post(supervisor.url + '/v1/token/encode', headers=supervisor.headers,
-            json={'text': body.messages, 'chat_template_kwargs': reasoning_kwargs(supervisor.model, effort)})
+            json={'text': body.messages, 'chat_template_kwargs': template_kwargs})
         if response.is_error:
             raise ValueError('Engine tokenization failed: ' + response.text[:2000])
         return {'input_tokens': response.json()['length'], 'prefix_reserve': 128, 'capacity': supervisor.settings.context}
@@ -482,9 +520,10 @@ async def token_count(body: ChatRequest):
 
 @app.post('/api/chat')
 async def chat(body: ChatRequest):
+    supervisor.check_request(body.messages, body.max_output, body.reasoning_effort, body)
     async def events():
         try:
-            async for event in supervisor.stream(body.messages, body.max_output, body.temperature, reasoning_effort=body.reasoning_effort):
+            async for event in supervisor.stream(body.messages, body.max_output, body.temperature, reasoning_effort=body.reasoning_effort, tool_request=body):
                 yield 'data: ' + json.dumps(event) + '\n\n'
         except Exception as exc:
             yield 'data: ' + json.dumps({'type': 'error', 'message': str(exc)}) + '\n\n'
@@ -499,17 +538,36 @@ async def openai_models():
 @app.post('/v1/chat/completions')
 async def openai_chat(request: Request):
     body = await request.json()
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be an object.')
+    if body.get('n', 1) != 1:
+        raise ValueError('Only n=1 is supported.')
+    for legacy in ('functions', 'function_call'):
+        if legacy in body:
+            raise ValueError('Legacy function calling is unsupported. Use tools and tool_choice.')
     if not supervisor.model or body.get('model') not in (supervisor.model['id'], supervisor.model['name'], None):
         raise HTTPException(404, 'Requested model is not loaded.')
-    checked = ChatRequest(messages=body.get('messages', []), max_output=body.get('max_tokens'), temperature=body.get('temperature'),
-                          reasoning_effort='off' if body.get('reasoning_effort') == 'none' else body.get('reasoning_effort'))
+    checked = ChatRequest(messages=body.get('messages', []), max_output=body.get('max_completion_tokens', body.get('max_tokens')), temperature=body.get('temperature'),
+                          reasoning_effort='off' if body.get('reasoning_effort') == 'none' else body.get('reasoning_effort'),
+                          tools=body.get('tools'), tool_choice=body.get('tool_choice'), parallel_tool_calls=body.get('parallel_tool_calls', True))
+    # Validate before opening SSE so unsupported modes/levels are HTTP errors,
+    # rather than an HTTP 200 followed by a silently ignored option.
+    supervisor.check_request(checked.messages, checked.max_output, checked.reasoning_effort, checked)
     identity = {'id': 'chatcmpl-' + secrets.token_hex(12), 'created': int(time.time()), 'model': supervisor.model['id']}
     if body.get('stream'):
         async def events():
             try:
-                async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature, reasoning_effort=checked.reasoning_effort):
+                yield 'data: ' + json.dumps({**identity, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]}) + '\n\n'
+                async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature, reasoning_effort=checked.reasoning_effort, tool_request=checked):
                     if event['type'] == 'token':
-                        yield 'data: ' + json.dumps({**identity, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'content': event['text'], 'reasoning_content': event['reasoning']}}]}) + '\n\n'
+                        for key, value in [('reasoning_content', event['reasoning']), ('content', event['text'])]:
+                            if value:
+                                yield 'data: ' + json.dumps({**identity, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {key: value}, 'finish_reason': None}]}) + '\n\n'
+                    elif event['type'] == 'tool_calls':
+                        deltas = [{'index': index, **call} for index, call in enumerate(event['tool_calls'])]
+                        yield 'data: ' + json.dumps({**identity, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'tool_calls': deltas}, 'finish_reason': None}]}) + '\n\n'
+                    elif event['type'] == 'cancelled':
+                        raise ValueError('Generation was cancelled before completion.')
                     elif event['type'] == 'error':
                         raise ValueError(event['message'])
                     elif event['type'] == 'complete':
@@ -518,15 +576,22 @@ async def openai_chat(request: Request):
             except Exception as exc:
                 yield 'data: ' + json.dumps({'error': {'message': str(exc)}}) + '\n\n'
         return StreamingResponse(events(), media_type='text/event-stream')
-    content, reasoning, usage, finish_reason = '', '', None, 'stop'
-    async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature, reasoning_effort=checked.reasoning_effort):
+    content, reasoning, usage, finish_reason, calls = '', '', None, 'stop', []
+    async for event in supervisor.stream(checked.messages, checked.max_output, checked.temperature, reasoning_effort=checked.reasoning_effort, tool_request=checked):
         if event['type'] == 'token':
             content += event['text']
             reasoning += event['reasoning']
+        elif event['type'] == 'tool_calls':
+            calls = event['tool_calls']
+        elif event['type'] == 'cancelled':
+            raise HTTPException(409, 'Generation was cancelled before completion.')
         elif event['type'] == 'complete':
             usage = event['usage']
             finish_reason = event['finish_reason']
-    return {**identity, 'object': 'chat.completion', 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': content, 'reasoning_content': reasoning}, 'finish_reason': finish_reason}], 'usage': usage}
+    message = {'role': 'assistant', 'content': content or (None if calls else ''), 'reasoning_content': reasoning}
+    if calls:
+        message['tool_calls'] = calls
+    return {**identity, 'object': 'chat.completion', 'choices': [{'index': 0, 'message': message, 'finish_reason': finish_reason}], 'usage': usage}
 
 
 class ProfileRequest(BaseModel):

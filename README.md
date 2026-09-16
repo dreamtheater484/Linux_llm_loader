@@ -145,6 +145,36 @@ API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, or
 
 The current 3-bit model set uses EXL3 3.04–3.05 bpw checkpoints. EXL3 weights cannot be loaded by vLLM by changing the engine selector. Vision also requires a checkpoint with a compatible embedded vision component or projector.
 
+## OpenAI-compatible tools
+
+Clients connect to Lumen's `/v1` base URL and must send `X-Lumen-Local: 1` on POST requests. No client API key is needed. Query `/v1/models` for the loaded model ID. The internal engine remains authenticated and bound to loopback.
+
+For ExLlamaV3 Qwen3.8 Flash Next, Lumen selects TabbyAPI's `qwen3_coder` parser only when the checkpoint architecture and selected chat template match its syntax. `/api/status` reports the active `tool_calling` capability. Other model/engine combinations retain ordinary chat; requests offering tools are explicitly rejected until a compatible parser is configured.
+
+The pinned Tabby runtime includes `patches/tabby-qwen-tool-schema.patch`. It passes tool schemas to the native Qwen parser, preserves explicitly declared string parameters verbatim, and accepts `True`/`False` only for explicitly boolean parameters. Duplicate parameters are rejected and output-limit termination is preserved, so truncated calls cannot be reported as completed calls. Final arguments must still pass Lumen's JSON Schema validation.
+
+`tools` reach the native chat template and token counter. Structured calls retain IDs, names and JSON arguments in both response modes. Streaming calls include indexes; calls are emitted after the engine finishes parsing and Lumen validates them, so arguments may arrive as one complete fragment. Lumen does not execute tools. The client supplies assistant `tool_calls` followed by `role: "tool"` results with matching `tool_call_id` values; multiple results may arrive in a different order.
+
+| Tool setting | Behavior |
+|---|---|
+| Omitted or `auto`, with tools | Model chooses whether to call the offered functions |
+| `none`, or no tools | Definitions omitted and native tool parsing disabled for that request |
+| `required` or a named function choice | HTTP 422: installed TabbyAPI does not enforce these modes |
+| `parallel_tool_calls: false` with active tools | HTTP 422: a single-call constraint is not supported |
+| `strict: true` | HTTP 422: constrained tool generation is not supported; ordinary tool arguments are still schema-validated after generation |
+
+Malformed, truncated, unknown or schema-invalid engine calls fail instead of becoming executable calls. Lumen never parses tool-looking prose itself. Invalid tool history and unsupported reasoning/tool options are rejected before opening a response stream.
+
+Qwen3.8 supports `reasoning_effort` values `default`, `off`, `low`, `medium`, and `xhigh`. `default` uses the checkpoint default, currently `xhigh`; the API also accepts `none` as an alias for `off`, and `on` enables the checkpoint's default thinking level. `minimal`, `high`, and `max` are rejected for this checkpoint even though other models may support them. Omitting the field uses the loaded profile's choice. Reasoning is returned separately in `reasoning_content`.
+
+After updating an existing installation, rerun the setup script with your existing model/runtime locations; it installs manager dependencies and applies the idempotent Tabby patches. Wait for active generation to finish before restarting Lumen and reloading the model to activate its native parser. Profiles need no migration. To exercise the complete API without executing real tools:
+
+```bash
+python3 scripts/verify_tool_calls.py --url http://YOUR_PRIVATE_LAN_IP:7860 --output validation/tool-calling-live.json
+```
+
+This checks schema visibility, streaming and non-streaming calls, reasoning off/low, explicit mode rejection, and synthetic tool-result round trips. It is API verification, not an end-to-end OpenCode tool or subagent test. Keep the generated report private.
+
 ## Files and privacy
 
 | Data | Default location |

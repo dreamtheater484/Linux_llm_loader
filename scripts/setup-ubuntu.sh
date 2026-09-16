@@ -127,9 +127,11 @@ if [[ ! -d "$tabby_dir/.git" ]]; then
 fi
 git -C "$tabby_dir" fetch --tags origin
 git -C "$tabby_dir" checkout --detach "$tabby_revision"
-if ! git -C "$tabby_dir" apply --reverse --check "$project_dir/patches/tabby-exl3-model-card.patch" 2>/dev/null; then
-    git -C "$tabby_dir" apply "$project_dir/patches/tabby-exl3-model-card.patch"
-fi
+for tabby_patch in tabby-exl3-model-card.patch tabby-qwen-tool-schema.patch; do
+    if ! git -C "$tabby_dir" apply --reverse --check "$project_dir/patches/$tabby_patch" 2>/dev/null; then
+        git -C "$tabby_dir" apply "$project_dir/patches/$tabby_patch"
+    fi
+done
 
 exl_dir="$runtime_dir/exl3"
 if [[ ! -x "$exl_dir/bin/python" ]]; then

@@ -24,7 +24,7 @@ def inspect_reasoning(template):
             'options': ['default'] + (['off'] if toggle else []) + (levels or (['on'] if toggle else []))}
 
 
-def native_reasoning(path, exl3=False):
+def native_template(path, exl3=False):
     # Match the installed engines' template preference. Unknown templates expose
     # only Model default, rather than advertising unsupported effort levels.
     names = (['tabby_template.jinja'] if exl3 else []) + ['chat_template.jinja', 'chat_template.json', 'tokenizer_config.json']
@@ -42,10 +42,14 @@ def native_reasoning(path, exl3=False):
                 elif isinstance(value, dict):
                     value = value.get('default')
             if isinstance(value, str) and value:
-                return inspect_reasoning(value)
+                return value
         except (OSError, ValueError, TypeError, AttributeError):
             continue
-    return inspect_reasoning('')
+    return ''
+
+
+def native_reasoning(path, exl3=False):
+    return inspect_reasoning(native_template(path, exl3))
 
 
 def reasoning_kwargs(model, effort):
