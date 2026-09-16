@@ -116,6 +116,20 @@ def test_cpu_power_only_uses_qualified_amd_package_sensor(tmp_path):
     assert power.sample()['watts'] is None
 
 
+def test_lan_access_is_limited_to_configured_private_subnet():
+    with patch.object(server, 'LAN_NETWORK', None):
+        assert server.client_allowed('127.0.0.1')
+        assert not server.client_allowed('10.42.7.40')
+        assert not server.client_allowed('203.0.113.40')
+    with patch.object(server, 'LAN_NETWORK', server.ipaddress.ip_network('10.42.7.0/24')):
+        assert server.client_allowed('10.42.7.40')
+        assert not server.client_allowed('10.42.8.40')
+        assert not server.client_allowed('203.0.113.40')
+    with patch.object(server, 'ALLOWED_HOSTS', {'127.0.0.1', '10.42.7.23'}):
+        assert server.origin_allowed('http://10.42.7.23:7860')
+        assert not server.origin_allowed('http://10.42.7.99:7860')
+
+
 def test_profile_migration_edit_collision_delete_restore(tmp_path):
     old = {'name': 'Everyday', 'settings': Settings(model_id='test').model_dump()}
     path = tmp_path / 'profiles.json'

@@ -3,6 +3,7 @@ import asyncio
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 import fcntl
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -28,7 +29,30 @@ from .metrics import Telemetry, number
 MODEL_ROOT = Path(os.environ.get('LUMEN_MODEL_ROOT', Path.home() / 'models')).expanduser()
 STATE = Path(os.environ.get('LUMEN_STATE', RUNTIME / 'state'))
 PORT = int(os.environ.get('LUMEN_PORT', '7860'))
+LAN_NETWORK = ipaddress.ip_network(os.environ['LUMEN_LAN_NETWORK'], strict=False) if os.environ.get('LUMEN_LAN_NETWORK') else None
+ALLOWED_HOSTS = {'localhost', '127.0.0.1', 'testserver'} | {
+    host.strip() for host in os.environ.get('LUMEN_ALLOWED_HOSTS', '').split(',') if host.strip()
+}
 telemetry = Telemetry()
+
+
+def client_allowed(host):
+    if host == 'testclient':
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    return LAN_NETWORK is not None and address in LAN_NETWORK
+
+
+def origin_allowed(origin):
+    if not origin:
+        return True
+    return origin in ({f'http://{host}:{PORT}' for host in ALLOWED_HOSTS}
+                      | {'http://127.0.0.1:5173'})
 
 
 def save_json(path, data):
@@ -362,10 +386,11 @@ app = FastAPI(title='Lumen local model workbench', lifespan=lifespan)
 @app.middleware('http')
 async def local_only(request: Request, call_next):
     host = request.headers.get('host', '').split(':')[0]
-    if host not in ('localhost', '127.0.0.1', 'testserver'):
-        return JSONResponse({'detail': 'Local access only.'}, status_code=403)
+    client = request.client.host if request.client else ''
+    if host not in ALLOWED_HOSTS or not client_allowed(client):
+        return JSONResponse({'detail': 'Local network access only.'}, status_code=403)
     origin = request.headers.get('origin')
-    if origin and origin not in (f'http://localhost:{PORT}', f'http://127.0.0.1:{PORT}', 'http://127.0.0.1:5173'):
+    if not origin_allowed(origin):
         return JSONResponse({'detail': 'Cross-origin access denied.'}, status_code=403)
     if request.method not in ('GET', 'HEAD', 'OPTIONS'):
         if request.headers.get('x-lumen-local') != '1':

@@ -15,6 +15,14 @@ def test_private_config_drives_launcher_paths(tmp_path):
     model_root.mkdir()
     data_home = tmp_path / 'data'
     config_home = tmp_path / 'config'
+    config_file = config_home / 'lumen/config.json'
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(json.dumps({
+        'listen_host': '10.42.7.23',
+        'lan_network': '10.42.7.0/24',
+        'allowed_hosts': ['10.42.7.23'],
+        'public_url': 'http://10.42.7.23:7860',
+    }))
     environment = {
         **os.environ,
         'XDG_DATA_HOME': str(data_home),
@@ -27,11 +35,12 @@ def test_private_config_drives_launcher_paths(tmp_path):
         '--model-dir', str(model_root), '--no-desktop',
     ], check=True, env=environment, capture_output=True, text=True)
 
-    config_file = config_home / 'lumen/config.json'
     config = json.loads(config_file.read_text(encoding='utf-8'))
     assert config['project'] == str(PROJECT)
     assert config['model_root'] == str(model_root)
     assert config['runtime'] == str(data_home / 'custom-runtime')
+    assert config['lan_network'] == '10.42.7.0/24'
+    assert config['public_url'] == 'http://10.42.7.23:7860'
     assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
 
     child_env = {k: v for k, v in environment.items() if k not in ('LUMEN_PROJECT', 'LUMEN_RUNTIME')}
@@ -56,3 +65,18 @@ def test_setup_help_does_not_require_installation():
     )
     assert '--model-dir PATH' in result.stdout
     assert '--preflight-only' in result.stdout
+
+
+def test_access_configurator_can_return_to_loopback(tmp_path):
+    config_home = tmp_path / 'config'
+    config_file = config_home / 'lumen/config.json'
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(json.dumps({'port': 7860, 'lan_network': '10.42.7.0/24'}))
+    subprocess.run([
+        sys.executable, str(PROJECT / 'scripts/configure-access.py'), '--local',
+    ], check=True, env={**os.environ, 'XDG_CONFIG_HOME': str(config_home)}, capture_output=True, text=True)
+    config = json.loads(config_file.read_text())
+    assert config['listen_host'] == '127.0.0.1'
+    assert config['allowed_hosts'] == ['127.0.0.1', 'localhost']
+    assert 'lan_network' not in config
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600

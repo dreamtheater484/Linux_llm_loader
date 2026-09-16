@@ -84,6 +84,10 @@
 .profile-card h2{font-size:17px;font-weight:600;color:#314f3d;line-height:1.5;margin:12px 0 8px;overflow-wrap:anywhere}
 .profile-card p.profile-model{font-size:12px;color:#738373;margin-bottom:17px}.profile-specs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px}
 .profile-specs span{font-size:10px;padding:5px 7px;background:#f0f4f1;color:#66806b;border-radius:5px}
+.profile-config{margin:0 0 18px;border:1px solid #dfe6e1;border-radius:9px;overflow:hidden;background:#f7f9f8}
+.profile-config-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border-bottom:1px solid #dfe6e1;color:#5b7061;font-size:10px;font-weight:650;letter-spacing:.04em;text-transform:uppercase}
+.copy-profile-config{display:flex;align-items:center;gap:5px;padding:5px 7px;border-radius:6px;color:#42634d;background:#e8f0e9;font-size:10px;font-weight:650;letter-spacing:0;text-transform:none;white-space:nowrap}
+.copy-profile-config:hover{background:#dce9df;color:#295b3d}.profile-config pre{margin:0;padding:11px 12px;max-height:230px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#405548;font:10px/1.55 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;user-select:text}
 .profile-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}.profile-actions .primary,.profile-actions .secondary{font-size:11px;padding:10px 12px;flex:1;white-space:nowrap}
 .benchmark-speeds{display:flex;gap:26px}.benchmark-number{font-size:28px;color:#337657}.benchmark-number.prompt-number{color:#7063a1}.benchmark-number span{font-size:10px;color:#73816f}
 .benchmark-card p{font-size:11px;line-height:1.7;color:#667d68}.benchmark-explainer p{color:#667d62}

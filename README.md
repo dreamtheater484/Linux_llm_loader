@@ -81,7 +81,27 @@ Open **Lumen** from Ubuntu's application menu, or run:
 ./launch.sh
 ```
 
-The interface opens at `http://127.0.0.1:7860`. Lumen and its inference engines bind only to the local computer.
+The interface opens at `http://127.0.0.1:7860`. Lumen starts in computer-only mode. Its inference engine always remains bound to loopback.
+
+## Optional private-LAN access
+
+To let phones, tablets, or other computers on the directly connected private network open Lumen:
+
+```bash
+python3 scripts/configure-access.py --lan
+```
+
+Quit and reopen Lumen. The command prints the private URL to use on other devices. LAN mode binds the GUI to the detected private IPv4 address and accepts clients only from that exact subnet. Requests from public internet addresses are rejected even if a router is accidentally configured to forward the port. No inference-engine port or temporary engine key is exposed.
+
+Every trusted device on that subnet can use the GUI; Lumen does not provide individual user accounts. Avoid LAN mode on guest, hotel, university, or other untrusted shared networks.
+
+Return to computer-only access with:
+
+```bash
+python3 scripts/configure-access.py --local
+```
+
+Quit and reopen Lumen again to apply the change. A changing DHCP address may also require rerunning `--lan`.
 
 ## External model drive
 
@@ -105,7 +125,7 @@ The device path is written only to `~/.config/lumen/config.json`; it is never ad
 4. Click **Load model** and wait for the ready state.
 5. Type a message, drag in an image, choose an image file, or paste a screenshot with **Ctrl+V**.
 6. Use **Benchmarks** to compare prompt-processing and decode speed with the exact settings recorded.
-7. Click **Save profile** to name the current setup. Saved profiles can be loaded, edited, renamed, deleted, restored, or saved as a copy.
+7. Click **Save profile** to name the current setup. Saved profiles can be loaded, edited, renamed, deleted, restored, or saved as a copy. Each card also shows its complete reusable JSON configuration with a one-click **Copy config** button.
 
 The conversation follows new output automatically. Scrolling away pauses tail following; **Jump to latest** resumes it. Closing the browser tab leaves the local server running. **Unload model** frees model RAM and VRAM. **Quit Lumen** stops the server.
 
@@ -144,7 +164,7 @@ Useful options:
 ./scripts/setup-ubuntu.sh --model-dir "/path/to/models" --no-desktop
 ```
 
-The launcher also accepts these environment overrides: `LUMEN_PROJECT`, `LUMEN_RUNTIME`, `LUMEN_MODEL_ROOT`, `LUMEN_PORT`, `LUMEN_MOUNT_DEVICE`, `LUMEN_STATE`, `LUMEN_TABBY`, and `LUMEN_GGUF_SERVER`.
+The launcher also accepts these environment overrides: `LUMEN_PROJECT`, `LUMEN_RUNTIME`, `LUMEN_MODEL_ROOT`, `LUMEN_PORT`, `LUMEN_LISTEN_HOST`, `LUMEN_LAN_NETWORK`, `LUMEN_PUBLIC_URL`, `LUMEN_MOUNT_DEVICE`, `LUMEN_STATE`, `LUMEN_TABBY`, and `LUMEN_GGUF_SERVER`.
 
 ## Troubleshooting
 
@@ -154,11 +174,12 @@ The launcher also accepts these environment overrides: `LUMEN_PROJECT`, `LUMEN_R
 - **First response is slow:** GPU kernels can compile on first use. Compare sustained performance over several requests.
 - **External drive moved:** rerun setup with the new `--model-dir` and optional `--mount-device` values.
 - **Port 7860 is occupied:** stop the other service or set a different `LUMEN_PORT` before launching.
+- **LAN URL stopped working:** the private DHCP address probably changed; rerun `python3 scripts/configure-access.py --lan` and restart Lumen.
 - **Full disk:** the private runtime uses about 10 GiB before caches. Models are stored separately and are not deleted by Lumen.
 
 ## Validation and development
 
-The repository keeps test procedures rather than machine-generated reports. See [VALIDATION.md](VALIDATION.md). Run the application tests with the manager environment:
+The repository keeps test procedures rather than machine-generated reports. See [VALIDATION.md](VALIDATION.md). Run the application tests with the inference environment:
 
 ```bash
 ~/.local/share/linux-llm-loader/exl3/bin/python -m pytest -q

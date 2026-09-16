@@ -24,12 +24,17 @@ config_dir.mkdir(parents=True, exist_ok=True)
 applications.mkdir(parents=True, exist_ok=True)
 shutil.copy2(project / 'launch.py', runtime / 'launch.py')
 shutil.copy2(project / 'assets/lumen.svg', runtime / 'lumen.svg')
-config = {'project': str(project), 'runtime': str(runtime), 'model_root': str(model_root), 'port': 7860}
+config_file = config_dir / 'config.json'
+try:
+    existing = json.loads(config_file.read_text(encoding='utf-8'))
+except (OSError, ValueError):
+    existing = {}
+access = {key: existing[key] for key in ('listen_host', 'lan_network', 'allowed_hosts', 'public_url') if key in existing}
+config = {**access, 'project': str(project), 'runtime': str(runtime), 'model_root': str(model_root), 'port': 7860}
 if args.mount_device:
     if not args.mount_device.startswith('/dev/'):
         raise SystemExit('--mount-device must be a device path below /dev/.')
     config['mount_device'] = args.mount_device
-config_file = config_dir / 'config.json'
 config_file.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
 config_file.chmod(0o600)
 print('Configured:', config_file)

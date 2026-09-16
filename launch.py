@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Launch Lumen using per-user configuration written during setup."""
 import json
+import ipaddress
 import os
 from pathlib import Path
 import subprocess
@@ -28,18 +29,28 @@ PROJECT = Path(os.environ.get('LUMEN_PROJECT', CONFIG.get('project', SOURCE_PROJ
 RUNTIME = Path(os.environ.get('LUMEN_RUNTIME', CONFIG.get('runtime', DATA_HOME / 'linux-llm-loader'))).expanduser()
 MODEL_ROOT = Path(os.environ.get('LUMEN_MODEL_ROOT', CONFIG.get('model_root', Path.home() / 'models'))).expanduser()
 PORT = int(os.environ.get('LUMEN_PORT', CONFIG.get('port', 7860)))
-URL = f'http://127.0.0.1:{PORT}'
+LISTEN_HOST = os.environ.get('LUMEN_LISTEN_HOST', CONFIG.get('listen_host', '127.0.0.1'))
+LAN_NETWORK = os.environ.get('LUMEN_LAN_NETWORK', CONFIG.get('lan_network', ''))
+PUBLIC_URL = os.environ.get('LUMEN_PUBLIC_URL', CONFIG.get('public_url', f'http://{LISTEN_HOST}:{PORT}'))
+PROBE_URL = f'http://{LISTEN_HOST}:{PORT}'
 
 
 def ready():
     try:
-        with urllib.request.urlopen(URL + '/api/status', timeout=1) as response:
+        with urllib.request.urlopen(PROBE_URL + '/api/status', timeout=1) as response:
             return 'hardware' in json.load(response)
     except Exception:
         return False
 
 
 def main():
+    listen_ip = ipaddress.ip_address(LISTEN_HOST)
+    if not (listen_ip.is_loopback or listen_ip.is_private):
+        raise RuntimeError('Lumen refuses to listen on a public IP address.')
+    if not listen_ip.is_loopback:
+        network = ipaddress.ip_network(LAN_NETWORK, strict=False) if LAN_NETWORK else None
+        if network is None or listen_ip not in network or not network.is_private:
+            raise RuntimeError('LAN mode needs a private LUMEN_LAN_NETWORK containing the listen address.')
     if not PROJECT.is_dir():
         mount_device = os.environ.get('LUMEN_MOUNT_DEVICE', CONFIG.get('mount_device'))
         if mount_device:
@@ -57,8 +68,10 @@ def main():
         with (state / 'manager.log').open('a') as log:
             environment = os.environ.copy()
             environment.update(LUMEN_PROJECT=str(PROJECT), LUMEN_RUNTIME=str(RUNTIME),
-                               LUMEN_MODEL_ROOT=str(MODEL_ROOT), LUMEN_PORT=str(PORT))
-            process = subprocess.Popen([str(python), '-m', 'uvicorn', 'loader.server:app', '--host', '127.0.0.1', '--port', str(PORT)],
+                               LUMEN_MODEL_ROOT=str(MODEL_ROOT), LUMEN_PORT=str(PORT),
+                               LUMEN_LISTEN_HOST=LISTEN_HOST, LUMEN_LAN_NETWORK=LAN_NETWORK,
+                               LUMEN_ALLOWED_HOSTS=','.join(CONFIG.get('allowed_hosts', [])))
+            process = subprocess.Popen([str(python), '-m', 'uvicorn', 'loader.server:app', '--host', LISTEN_HOST, '--port', str(PORT)],
                 cwd=PROJECT, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         for _ in range(120):
             if ready():
@@ -70,8 +83,8 @@ def main():
             process.terminate()
             raise RuntimeError(f'Lumen startup timed out. Read {state / "manager.log"}.')
     if '--no-browser' not in sys.argv:
-        webbrowser.open(URL)
-    print(URL)
+        webbrowser.open(PUBLIC_URL)
+    print(PUBLIC_URL)
 
 
 if __name__ == '__main__':
