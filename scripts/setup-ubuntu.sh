@@ -144,6 +144,13 @@ fi
     "$project_dir/.runtime/wheels/exllamav3-1.5.0+cu128.torch2.9.0-cp312-cp312-linux_x86_64.whl" \
     "$tabby_dir"
 
+# The pinned wheel drops earlier output-token counts after a second requeue.
+# Patch the installed Python module (no CUDA rebuild or model changes).
+exl_site=$("$exl_dir/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+if ! git -C "$exl_site" apply --reverse --check "$project_dir/patches/exl3-cumulative-output-tokens.patch" 2>/dev/null; then
+    git -C "$exl_site" apply "$project_dir/patches/exl3-cumulative-output-tokens.patch"
+fi
+
 [[ -f "$project_dir/frontend/dist/index.html" ]] || {
     echo 'The compiled interface is missing from this checkout.' >&2; exit 1;
 }

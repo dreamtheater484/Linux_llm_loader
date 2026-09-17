@@ -56,13 +56,34 @@ class DownloadTests(unittest.TestCase):
                 patch.object(helper.shutil, 'disk_usage', return_value=types.SimpleNamespace(free=free)):
             return helper.main()
 
-    def test_only_three_bit_variants_and_subset_selection(self):
-        self.assertEqual([m['revision'] for m in helper.select_models('All')],
+    def test_default_stays_three_bit_and_qwen4_is_explicit(self):
+        self.assertEqual([m['revision'] for m in helper.select_models(helper.DEFAULT_MODELS)],
                          ['3.05bpw_h5_ng5', '3.04bpw', '3.04bpw'])
+        self.assertEqual(len(helper.select_models('All')), 4)
+        qwen4 = helper.select_models('QWEN4, qwen4')
+        self.assertEqual(len(qwen4), 1)
+        self.assertEqual(qwen4[0]['revision'], '4.05bpw_h6_ng6')
+        self.assertNotEqual(qwen4[0]['folder'], self.spec['folder'])
         self.assertEqual(helper.select_models('QWEN3, qwen3'), [self.spec])
-        for invalid in ('', 'Qwen4', 'All,invalid'):
+        for invalid in ('', 'Qwen5', 'All,invalid'):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 helper.select_models(invalid)
+
+    def test_qwen4_requires_vision_and_embeddings_and_has_separate_receipt(self):
+        spec = helper.select_models('Qwen4')[0]
+        old = self.plan()
+        helper.write_json(self.receipt(), old)
+        with self.assertRaisesRegex(ValueError, 'vision/embedding'):
+            helper.make_plan(self.api, self.root, [spec])
+        self.api.model_info.return_value.siblings.extend([
+            types.SimpleNamespace(rfilename=name, size=5) for name in spec['required_files']])
+        plan = helper.make_plan(self.api, self.root, [spec])[0]
+        helper.write_json(self.receipt(spec), plan)
+        self.assertEqual(json.loads(self.receipt().read_text()), old)
+        self.assertEqual(plan['commit'], SHA)
+        self.api.reset_mock()
+        helper.make_plan(self.api, self.root, [spec])
+        self.api.model_info.assert_called_once_with(spec['repo'], revision=SHA, files_metadata=True, timeout=30)
 
     def test_paths_with_spaces_work_and_escape_is_rejected(self):
         self.assertEqual(helper.local_file(self.root, 'nested/file.json'), self.root / 'nested/file.json')
@@ -142,7 +163,7 @@ class DownloadTests(unittest.TestCase):
         visits = []
 
         def fake_download(plan, root, hf, downloader, workers, verify_only):
-            for spec in helper.CATALOG:
+            for spec in helper.select_models(helper.DEFAULT_MODELS):
                 self.assertEqual(json.loads(self.receipt(spec).read_text())['commit'], SHA)
             visits.append(plan['id'])
             if plan['id'] == 'Qwen3':

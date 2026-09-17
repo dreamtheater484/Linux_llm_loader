@@ -107,6 +107,8 @@ def test_switch_reasoning_per_request_without_reload_or_budget(engine):
             chosen = effort if effort is not None else 'off'
             assert events[-1]['reasoning_effort'] == chosen
             assert events[-1]['usage']['completion_tokens'] == 1100
+            assert events[-1]['tokens_per_second'] == 20
+            assert events[-1]['speed_source'] == 'engine'
             payload = calls[-1][1]
             assert payload.get('chat_template_kwargs', {}) == reasoning_kwargs(supervisor.model, chosen)
             assert 'reasoning_budget_tokens' not in payload

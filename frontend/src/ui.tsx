@@ -17,13 +17,13 @@ export function Performance({metrics,compact=false}:{metrics:any;compact?:boolea
     <span className="speed prompt-speed" title={`Speed reported by the engine while processing the prompt. ${formatNumber(cached??0,0)} input tokens reused from cache.`}>
       <ArrowDownToLine size={14}/><span>Prompt processing<strong>{formatNumber(promptSpeed(metrics))}<small>tok/s</small></strong></span>
     </span>
-    <span className="speed decode-speed" title="Speed reported by the engine while generating the answer.">
+    <span className="speed decode-speed" title="Generation speed includes thinking and the final answer. Prompt processing is measured separately.">
       <Zap size={14}/><span>Decoding<strong>{formatNumber(metrics?.tokens_per_second)}<small>tok/s</small></strong></span>
     </span>
     <span className="speed latency" title="Time from sending the request to the first visible token, including prompt processing.">
       <Timer size={14}/><span>First token<strong>{formatNumber(metrics?.first_token_seconds)}<small>s</small></strong></span>
     </span>
-    {compact&&<span className="response-token-count">{formatNumber(metrics?.usage?.completion_tokens,0)} output tokens{cached>0&&<span> · {formatNumber(cached,0)} cached input</span>}</span>}
+    {compact&&<span className="response-token-count" title="Total generated tokens, including thinking and the final answer.">{formatNumber(metrics?.usage?.completion_tokens,0)} output tokens{cached>0&&<span> · {formatNumber(cached,0)} cached input</span>}</span>}
   </div>;
 }
 

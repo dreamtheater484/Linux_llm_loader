@@ -1,21 +1,25 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Download the three 3-bit EXL3 model variants for later use on Ubuntu.
+Download resumable, checksum-verified EXL3 models for later use on Ubuntu.
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\download-models.ps1
 .EXAMPLE
 .\download-models.ps1 -ModelRoot 'D:\Documents\AI\models' -Models Qwen3
+.EXAMPLE
+.\download-models.ps1 -ModelRoot 'D:\Documents\AI\models' -Models Qwen4
 .NOTES
 Requires Windows and Python 3.10+. No administrator rights or GPU required.
 Downloads complete Hugging Face revisions, with resuming and checksum verification.
+The default selection stays the original three 3-bit variants. Qwen4 selects only
+the 4.05 bpw Qwen model; explicit All selects all four variants.
 The default destination is ..\..\AI\models relative to this script in the project.
 #>
 [CmdletBinding()]
 param(
     [string]$ModelRoot,
-    [ValidateSet('All', 'Qwen3', 'DeepSeek3', 'DeepSeekVision3')]
-    [string[]]$Models = @('All'),
+    [ValidateSet('All', 'Qwen3', 'DeepSeek3', 'DeepSeekVision3', 'Qwen4')]
+    [string[]]$Models = @('Qwen3', 'DeepSeek3', 'DeepSeekVision3'),
     [ValidateRange(1, 8)]
     [int]$Workers = 2,
     [switch]$List,
@@ -277,7 +281,11 @@ CATALOG = [
          revision='3.04bpw', folder='DeepSeek-V4-Flash-0731-EXL3-3.04bpw'),
     dict(id='DeepSeekVision3', repo='turboderp/DeepSeek-V4-Flash-Vision-Exp-exl3',
          revision='3.04bpw', folder='DeepSeek-V4-Flash-Vision-Exp-EXL3-3.04bpw'),
+    dict(id='Qwen4', repo='turboderp/Qwen3.8-Flash-Next-exl3',
+         revision='4.05bpw_h6_ng6', folder='Qwen3.8-Flash-Next-EXL3-4.05bpw',
+         required_files=['vision_k6.safetensors', 'ngram_embedding.safetensors']),
 ]
+DEFAULT_MODELS = 'Qwen3,DeepSeek3,DeepSeekVision3'
 
 
 def write_json(path, value):
@@ -348,6 +356,8 @@ def make_plan(api, root, specs):
         names = {f['name'] for f in files}
         if not {'config.json', 'tokenizer_config.json'} <= names:
             raise ValueError(f"Missing basic model metadata in {spec['id']}")
+        if not set(spec.get('required_files', [])) <= names:
+            raise ValueError(f"Missing required vision/embedding files in {spec['id']}")
         if not any(n.endswith('.safetensors') for n in names):
             raise ValueError(f"No safetensors model weights in {spec['id']}")
         plans.append(dict(**spec, commit=info.sha, files=files,
@@ -391,7 +401,7 @@ def download_one(plan, root, hf_exe, downloader, workers, verify_only):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--root', required=True)
-    p.add_argument('--models', default='All')
+    p.add_argument('--models', default=DEFAULT_MODELS)
     p.add_argument('--hf', required=True)
     p.add_argument('--workers', type=int, default=2)
     p.add_argument('--list', action='store_true')

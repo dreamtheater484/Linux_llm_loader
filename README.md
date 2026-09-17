@@ -105,6 +105,22 @@ Quit and reopen Lumen again to apply the change. A changing DHCP address may als
 
 ## External model drive
 
+### Download Qwen3.8 Flash Next 4.05 bpw on Windows
+
+Use the updated `download-models.ps1` from this checkout. It reuses the resumable HTTP downloader, with Xet disabled. In PowerShell, from the checkout folder:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\download-models.ps1 -Models Qwen4 -ModelRoot "D:\Documents\AI\models"
+```
+
+Replace the drive/path with your existing model folder. Requires Windows PowerShell 5.1+ and Python 3.10+. It selects only [turboderp's `4.05bpw_h6_ng6` revision](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/4.05bpw_h6_ng6), including its vision tower, PLE/n-gram table, MTP weights, tokenizer and chat template. The model gets its own `Qwen3.8-Flash-Next-EXL3-4.05bpw` folder; existing 3-bit files stay separate.
+
+At verification the complete repository is 107.46 GB (100.08 GiB). Allow about **120 GB free** for the download and the script's headroom check. Add `-List` to preview current sizes without downloading weights, or `-VerifyOnly` to recheck an existing download. If interrupted, rerun the same command: completed files are reused and saved partial files resume. Final checksum verification reads all files and can take several minutes.
+
+The downloader pins the first resolved commit, validates HTTP byte ranges, retries expired links/timeouts/rate limits, checks remaining disk space, prevents simultaneous writers, logs progress, and reports success only after checksum verification. It does not execute model code. The default selection remains the original three 3-bit models; `Qwen4` is opt-in, and explicit `All` selects all four variants.
+
+### Storage
+
 An external drive is fine. Drive speed affects installation, model loading, and cold startup; steady generation primarily uses RAM and VRAM. A Linux filesystem is preferable for the application runtime, while model files can remain on NTFS or another mounted filesystem.
 
 If the project or models live on a removable drive and you want the launcher to mount it automatically, provide its stable device path during setup:
@@ -132,6 +148,8 @@ The conversation follows new output automatically. Scrolling away pauses tail fo
 The **Thinking** selector above the message box applies to the next message, even after loading the model. **Model default** leaves reasoning to the checkpoint's chat template; **Off** and native effort levels appear only when identified in that template. The current Qwen3.8 Flash Next template offers Low, Medium and Extra high (default); both DeepSeek V4 Flash templates offer Low (default), High and Max. Other checkpoints may offer different choices. Effort levels are model instructions, not fixed token budgets.
 
 There is no separate 1K thinking cap. **Maximum output** limits thinking and the final answer together, so increase it for longer reasoning. An output-limit notice explains when generation stops at that limit. Saved profiles include the selected effort; older profiles retain Off if thinking was disabled, while previously enabled thinking becomes Model default. Changing effort does not change GPU placement or reload weights, although a changed prompt prefix may reduce prompt-cache reuse.
+
+**Decode speed includes thinking tokens**, answer tokens and tool-call output. The engine counts generated token IDs before splitting the response into channels; prompt processing is separate. The pinned ExLlamaV3 1.5.0 wheel has a cumulative-counter bug after multiple output requeues: earlier tokens are omitted while elapsed generation time is retained. Setup applies `patches/exl3-cumulative-output-tokens.patch` to the installed Python module, correcting counts and reported speed for long responses without changing inference settings or token generation. See [the accounting investigation](validation/GENERATION_ACCOUNTING.md).
 
 API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, or `/v1/chat/completions`. Use `default`, `off` (or OpenAI's `none` alias on the `/v1` route), or a native level listed by the model's `reasoning.options` in `/api/library`. Omitting it uses the loaded profile's saved choice. Unsupported levels are rejected; the same template variables are used for token counting and generation. vLLM and llama.cpp integrations remain unqualified until tested with their installed engine/checkpoint versions. Their request template controls are documented by [vLLM](https://docs.vllm.ai/en/latest/features/reasoning_outputs/) and [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
 
