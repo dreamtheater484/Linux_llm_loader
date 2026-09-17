@@ -247,7 +247,7 @@ def test_strict_agent_action_and_python_extraction():
 def test_repository_agent_deadline_stops_commands_before_grading(tmp_path, monkeypatch):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
-        manifest = dict(dataset='SWE-bench Lite', revision='fixture', worker_image='sha256:worker',
+        manifest = dict(dataset='SWE-bench Lite', revision='fixture', worker_image='sha256:worker', selection=b.SUITES['swebench']['selection'],
             tasks=[dict(id='repo__issue-1', prompt='Fix this', base_commit='a' * 40, image_id='sha256:repo')])
         manifest['fingerprint'] = b.digest(manifest)
         b.atomic_json(mgr.assets / 'swebench.json', manifest)
@@ -257,7 +257,7 @@ def test_repository_agent_deadline_stops_commands_before_grading(tmp_path, monke
         async def command(*args, **kwargs):
             return 0, 'diff --git a/f.py b/f.py\n' if args[:2] == ('docker', 'exec') else ''
         mgr.command = AsyncMock(side_effect=command)
-        await mgr.start('swebench', 'test', 300)
+        await mgr.start('swebench', 'test', 600)
         await mgr.task
         task = mgr.current['tasks'][0]
         assert task['state'] == 'passed' and 'grading the current patch' in task['agent_limit']
@@ -267,4 +267,139 @@ def test_repository_agent_deadline_stops_commands_before_grading(tmp_path, monke
         diff = next(i for i, c in enumerate(calls) if c[:2] == ('docker', 'exec'))
         assert kill < restart < diff
         assert mgr.grade_repository.await_args.args[1].startswith('diff --git')
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('network_failure', [False, True])
+def test_preparation_publishes_only_verified_subset_and_keeps_diagnostics(tmp_path, monkeypatch, network_failure):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        tasks = [dict(id=f'repo__issue-{i}', repo=f'org/repo{i}', image=f'fixture:{i}', reference_patch='reference fix') for i in range(3)]
+        mgr.worker = AsyncMock(return_value=dict(dataset='SWE-bench Lite', revision='fixture', selection=b.SUITES['swebench']['selection'], tasks=tasks))
+        mgr.command = AsyncMock(return_value=(0, 'sha256:fixture'))
+        async def grade(source, patch, image, timeout):
+            if network_failure:
+                return {'passed': False, 'report': {'tests_status': {'FAIL_TO_PASS': {'failure': ['test one']}}}}, 'Temporary failure in name resolution: httpbin.org'
+            return {'passed': bool(patch)}, 'Full upstream test output'
+        mgr.grade_repository = AsyncMock(side_effect=grade)
+        await mgr._prepare('swebench')
+        log = (mgr.assets / 'swebench-setup.log').read_text()
+        assert mgr.setup['log_url'] == '/api/evaluations/preparation-log?suite=swebench'
+        if network_failure:
+            assert mgr.setup['state'] == 'error'
+            assert 'network service unavailable' in mgr.setup['message']
+            assert len(mgr.setup['message']) < 300
+            assert 'httpbin.org' in log and 'test one' in log
+            assert not (mgr.assets / 'swebench.json').exists()
+        else:
+            assert mgr.setup['state'] == 'complete'
+            assert mgr.grade_repository.await_count == 6
+            manifest = mgr.manifest('swebench')
+            assert all(t['validation'] == {'reference_passed': True, 'baseline_failed': True} for t in manifest['tasks'])
+            assert 'reference_patch' not in json.dumps(manifest)
+            assert 'Full upstream test output' in log
+        monkeypatch.setattr(server, 'evaluations', mgr)
+        client = TestClient(server.app)
+        response = client.get('/api/evaluations/preparation-log?suite=swebench')
+        assert response.status_code == 200 and response.text == log
+        assert client.get('/api/evaluations/preparation-log?suite=../../outside').status_code == 422
+    asyncio.run(check())
+
+
+def test_old_network_dependent_subset_must_be_prepared_again(tmp_path, monkeypatch):
+    mgr = manager(tmp_path, monkeypatch)
+    legacy = dict(dataset='SWE-bench Lite', selection='lumen-coding-v1', tasks=[])
+    legacy['fingerprint'] = b.digest(legacy)
+    b.atomic_json(mgr.assets / 'swebench.json', legacy)
+    with pytest.raises(ValueError, match='subset is outdated'):
+        mgr.manifest('swebench')
+
+
+def repository_manifest(mgr):
+    manifest = dict(dataset='SWE-bench Lite', revision='fixture', worker_image='sha256:worker',
+        selection=b.SUITES['swebench']['selection'], tasks=[dict(id=f'repo__issue-{i}',
+            prompt='Fix the bug', base_commit='a' * 40, image_id='sha256:repo') for i in range(3)])
+    manifest['fingerprint'] = b.digest(manifest)
+    b.atomic_json(mgr.assets / 'swebench.json', manifest)
+    return manifest
+
+
+@pytest.mark.parametrize('minutes,count', [(10, 1), (20, 2), (30, 3)])
+def test_repository_presets_select_and_archive_only_budgeted_tasks(tmp_path, monkeypatch, minutes, count):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        original = repository_manifest(mgr)
+        async def repository(index, source, task, manifest, deadline):
+            task.update(state='passed', grade={'passed': True})
+        mgr.repository = AsyncMock(side_effect=repository)
+        await mgr.start('swebench', 'test', minutes * 60)
+        await mgr.task
+        saved = mgr.get(mgr.current['id'])
+        expected = [t['id'] for t in original['tasks'][:count]]
+        assert saved['state'] == 'complete' and saved['summary']['score'] == 100
+        assert [t['id'] for t in saved['tasks']] == expected
+        assert saved['evaluation']['task_ids'] == expected and saved['evaluation']['count'] == count
+        assert saved['dataset']['pool_fingerprint'] == original['fingerprint']
+        assert mgr.manifest('swebench') == original  # Prepared cache is unchanged.
+        assert len({b.select_repository_tasks(original, n)['fingerprint'] for n in (600, 1200, 1800)}) == 3
+    asyncio.run(check())
+
+
+def test_repository_remaining_run_budget_reserves_grading(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        repository_manifest(mgr)
+        mgr.new_repository = AsyncMock(return_value='agent')
+        mgr.generate = AsyncMock(side_effect=TimeoutError())
+        mgr.grade_repository = AsyncMock(return_value=({'passed': False}, 'Required tests failed'))
+        await mgr.start('swebench', 'test', 600)
+        # A short remaining run must cut inference BEFORE its fixed 420s cap.
+        mgr.current['budget_seconds'] = 220
+        await mgr.task
+        task = mgr.current['tasks'][0]
+        assert 0 < task['generation_budget_seconds'] <= 20
+        assert mgr.grade_repository.await_count == 1
+        assert task['state'] == 'failed' and not task['patch_present']
+        assert 'No patch was produced' in task['detail']
+        assert 'grading the current patch' in b.report_markdown(mgr.current)
+        assert 'Actions' not in b.report_markdown(mgr.current)  # No completed action.
+    asyncio.run(check())
+
+
+def test_repository_patch_survives_cancellation_and_feedback_is_recorded(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        repository_manifest(mgr)
+        mgr.new_repository = AsyncMock(return_value='agent')
+        patch = 'diff --git a/f.py b/f.py\n+fix\n'
+        async def command(*args, **kwargs):
+            return 0, patch if args[-1].find('git read-tree') >= 0 else 'command completed'
+        mgr.command = AsyncMock(side_effect=command)
+        waiting = asyncio.Event()
+        async def generate(messages, task, index, filename):
+            if len(messages) == 2:
+                assert '40 actions remaining' in messages[-1]['content']
+                return dict(role='assistant', content='{"command":"edit f.py"}')
+            assert '39 actions remaining' in messages[-1]['content'] and 'A patch is saved' in messages[-1]['content']
+            waiting.set()
+            await asyncio.Event().wait()
+        mgr.generate = generate
+        await mgr.start('swebench', 'test', 600)
+        await asyncio.wait_for(waiting.wait(), 1)
+        await mgr.stop()
+        root = mgr.root / mgr.current['id'] / 'task-01'
+        assert (root / 'patch.diff').read_text() == patch
+        assert mgr.current['tasks'][0]['patch_present'] and mgr.current['state'] == 'cancelled'
+        assert '39 actions remaining' in json.loads((root / 'trajectory.json').read_text())[0]['budget_feedback']
+    asyncio.run(check())
+
+
+def test_grading_deadline_includes_repository_startup(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        async def startup(source):
+            await asyncio.Event().wait()
+        mgr.new_repository = startup
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(mgr.grade_repository({}, '', 'worker', timeout=.01), .5)
     asyncio.run(check())

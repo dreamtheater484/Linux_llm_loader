@@ -22,3 +22,5 @@
 .eval-empty p,.eval-comparison-table tbody th,.eval-comparison-table thead small{color:#61735b}
 .eval-filters label:focus-within{outline:2px solid #5e896c;outline-offset:2px}
 .eval-dialog .eval-detail-overview .eval-score>span{font-size:11px}
+
+.eval-preset{padding-top:14px;margin-bottom:0}

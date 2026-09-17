@@ -12,7 +12,10 @@ from pathlib import Path
 import sys
 
 SEED = 'lumen-coding-v1'
-REPOS = ('psf/requests', 'pallets/flask', 'pytest-dev/pytest')
+# Requests' historical tests depend on public HTTP services. Keep the fixed
+# offline subset explicit and versioned; never omit failing upstream tests.
+SWE_SELECTION = 'lumen-swe-offline-v2'
+REPOS = ('pylint-dev/pylint', 'pallets/flask', 'pytest-dev/pytest')
 
 
 def digest(value):
@@ -74,7 +77,7 @@ def swe_manifest():
                           prompt=row['problem_statement'], image=spec.instance_image_key,
                           spec=dataclasses.asdict(spec), eval_script=spec.eval_script,
                           reference_patch=row['patch']))
-    return dict(dataset=dataset, revision=revision, selection=SEED, dependencies=dependencies(), tasks=tasks)
+    return dict(dataset=dataset, revision=revision, selection=SWE_SELECTION, dependencies=dependencies(), tasks=tasks)
 
 
 def swe_grade(body):

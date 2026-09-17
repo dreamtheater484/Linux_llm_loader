@@ -753,6 +753,14 @@ async def evaluation_prepare(body: PreparationRequest):
     return await evaluations.prepare(body.suite)
 
 
+@app.get('/api/evaluations/preparation-log')
+async def evaluation_preparation_log(suite: Literal['humaneval', 'swebench']):
+    path = evaluations.assets / f'{suite}-setup.log'
+    if not path.is_file():
+        raise HTTPException(404, 'No preparation log is available for this benchmark yet.')
+    return FileResponse(path, media_type='text/plain', filename=f'lumen-{suite}-setup.log')
+
+
 @app.post('/api/evaluations', status_code=202)
 async def evaluation_start(body: EvaluationRequest):
     return await evaluations.start(body.suite, body.model_id, body.budget_minutes * 60)
