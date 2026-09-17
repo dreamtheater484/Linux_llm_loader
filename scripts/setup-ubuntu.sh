@@ -8,6 +8,7 @@ model_dir="${LUMEN_MODEL_ROOT:-}"
 mount_device="${LUMEN_MOUNT_DEVICE:-}"
 install_desktop=1
 preflight_only=0
+install_benchmarks=0
 
 usage() {
     cat <<'EOF'
@@ -21,6 +22,7 @@ Optional:
   --mount-device PATH    Removable model drive, such as /dev/disk/by-uuid/...
   --no-desktop           Configure Lumen without an application-menu shortcut
   --preflight-only       Check the machine and arguments without installing
+  --with-benchmarks      Install Docker, enable its service, and grant this user Docker-group access
   -h, --help             Show this help
 EOF
 }
@@ -32,6 +34,7 @@ while (($#)); do
         --mount-device) mount_device="${2:?--mount-device needs a path}"; shift 2 ;;
         --no-desktop) install_desktop=0; shift ;;
         --preflight-only) preflight_only=1; shift ;;
+        --with-benchmarks) install_benchmarks=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -96,6 +99,15 @@ fi
 if ((preflight_only)); then
     echo 'Preflight passed. The GPU, model directory, build tools, and runtime disk are available.'
     exit 0
+fi
+
+if ((install_benchmarks)); then
+    benchmark_user="${SUDO_USER:-$(id -un)}"
+    if ((EUID == 0)); then
+        /bin/bash "$project_dir/scripts/install-benchmark-docker.sh" --user "$benchmark_user"
+    else
+        sudo /bin/bash "$project_dir/scripts/install-benchmark-docker.sh" --user "$benchmark_user"
+    fi
 fi
 
 mkdir -p "$runtime_dir/bin" "$runtime_dir/sources" "$project_dir/.runtime/wheels"

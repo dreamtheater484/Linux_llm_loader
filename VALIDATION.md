@@ -23,6 +23,30 @@ The suite covers:
 
 The Windows-only PowerShell integration test is skipped on Linux. Local HTTP transfer tests use a temporary loopback server and do not download models.
 
+The manager environment also runs the app tests. To run the entire suite there, install the development-only `pytest`, `filelock`, and `huggingface-hub` dependencies in a separate test environment or target directory; they are used by the downloader tests, not by benchmark inference.
+
+## Coding benchmark verification
+
+`tests/test_benchmarks.py` covers frozen configurations, secret removal, all settings in Markdown, ZIP contents, database pagination/search, cancellation before and during work, partial-answer preservation, hard run deadlines, restart recovery, changed-asset rejection, concurrent-run protection, export routes, and subprocess timeout/output limits. These tests use synthetic results and do not exercise Docker.
+
+Verify the real upstream graders separately, without loading or querying a model:
+
+```bash
+~/.local/share/linux-llm-loader/manager/bin/python scripts/verify_benchmarks.py \
+  --prepare --suite all --output validation/coding-graders.json
+```
+
+Use the manager Python for your installation (older installations may use `.runtime/manager/bin/python`). `--prepare` builds/downloads task environments and checks each repository's reference fix and unfixed baseline. Omit it for an offline recheck of already prepared assets. The verifier runs all 20 HumanEval+ canonical solutions through EvalPlus, rejects a deliberately incorrect answer, stops infinite generated code with the external deadline, checks repository baselines, and checks container cleanup. It does not create fake model-performance archive entries. Do not run the verifier against the same state directory as an active coding benchmark.
+
+Interface acceptance for the coding modes:
+
+- Prepare both modes, start with the loaded configuration, change tabs, and verify live progress survives navigation.
+- Stop during inference and during test execution. Completed results and available partial output must remain archived.
+- Search archived runs beyond the first page; inspect a finished and an incomplete result. No aggregate accuracy should appear for an incompletely graded run.
+- Copy a report and compare it to its JSON download. All model, quantization, KV, MTP, vision, reasoning, sampling, and placement settings must agree.
+- Compare two runs; changed subset/protocol/time limits must be flagged. Inspect the ZIP's per-task answers, available patches/trajectories, and grader output.
+- Verify keyboard/Escape behavior, clipboard fallback, download links, and narrow-screen layouts. UI screenshots with synthetic fixtures are visual checks, not model-performance evidence.
+
 ## Fresh-install qualification
 
 Use a clean supported Ubuntu installation and run:

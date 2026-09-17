@@ -140,10 +140,44 @@ The device path is written only to `~/.config/lumen/config.json`; it is never ad
 3. Choose an MTP length and CPU expert share from a saved or recommended profile.
 4. Click **Load model** and wait for the ready state.
 5. Type a message, drag in an image, choose an image file, or paste a screenshot with **Ctrl+V**.
-6. Use **Benchmarks** to compare prompt-processing and decode speed with the exact settings recorded.
+6. Use **Benchmarks** for timed coding evaluations, an archive with comparison and report exports, or the original prompt-processing and decode speed test.
 7. Click **Save profile** to name the current setup. Saved profiles can be loaded, edited, renamed, deleted, restored, or saved as a copy. Each card also shows its complete reusable JSON configuration with a one-click **Copy config** button.
 
 The conversation follows new output automatically. Scrolling away pauses tail following; **Jump to latest** resumes it. Closing the browser tab leaves the local server running. **Unload model** frees model RAM and VRAM. **Quit Lumen** stops the server.
+
+## Coding benchmarks in 30 minutes or less
+
+Open **Benchmarks → Run a benchmark**, choose a test, and prepare its environments once. Load the model/profile you want to measure, check the displayed configuration, choose a 10-, 20-, or 30-minute maximum, and start. Preparation downloads are outside the timer; timed runs use cached data and containers. **Stop & archive** retains completed results and available partial answers.
+
+| Mode | What it measures | Fixed local subset |
+|---|---|---|
+| Quick coding | Writing correct Python functions, checked with the original and extended [EvalPlus](https://github.com/evalplus/evalplus) tests | 20 HumanEval+ problems; up to 90 seconds per problem |
+| Repository coding | Inspecting and fixing real codebases with Lumen's bash agent, then grading in a fresh checkout with the official [SWE-bench](https://github.com/SWE-bench/SWE-bench) harness | 3 SWE-bench Lite issues, one each from Requests, Flask, and pytest; up to 10 minutes per issue |
+| Speed test | Prompt-processing and decode throughput, without grading answers | The existing three prompts |
+
+The short coding modes are practical alternatives to a lengthy DeepSWE run. They are **not DeepSWE or LiveBench implementations** and their scores are not full-suite or official leaderboard results. The repository runner is Lumen's own JSON/bash agent, with one attempt and at most 40 turns. It works without requiring a checkpoint-specific native tool parser. It reserves time to grade the latest patch when the agent budget expires. Vision remains in the recorded configuration, but these are text-only coding tests, not a vision evaluation.
+
+**Reading results:** passed tasks satisfy the upstream tests; failed tests are distinct from runner errors, time limits, and unattempted tasks. Aggregate accuracy appears only when every selected task has a grading result. Partial runs show passed/selected and grading coverage. Time limits measure speed and quality together; a small subset is a quick comparison, not a precise ranking. Generation uses the loaded maximum output, temperature, and reasoning choice. Output limits include reasoning. Sampling defaults other than temperature remain the installed engine's defaults, and results can vary across repeated runs.
+
+**Archive and sharing:** every run records the model name, path, quantization, model ID, file metadata and available download receipt; all settings including context, KV precision, MTP and draft length, vision, reasoning, output cap, temperature, CPU placement/threads, and chunk size; effective and requested engine configuration; runtime packages/source fingerprints; hardware; dataset revision, immutable Docker image IDs, task IDs, prompts, limits, timings, and available generation metrics. File metadata fingerprints are not full weight checksums; small model configuration/template files are hashed. Saved-profile names are captured when their configuration matches exactly.
+
+Use **Archive** to search by model or quantization, inspect individual tasks, or compare two runs. **Copy full report** produces Markdown suitable for pasting elsewhere; Markdown, JSON, and ZIP downloads are also available. ZIPs include available answers, reasoning, trajectories, code/patches, and grader output. Reports contain local model paths and configuration details. Their contents can be inspected before sharing. Archives survive restarts and remain available if a model/profile is later renamed or removed.
+
+Results live in `~/.local/share/linux-llm-loader/state/results.sqlite3` and `state/evaluations/<run-id>/`; cached manifests live under `state/evaluations/assets/`. Copy both the database and evaluation directory when backing up. Docker stores images in its own data directory. Nothing is uploaded by the benchmark runner. A previously interrupted run is retained with an **Interrupted** status.
+
+### Install the benchmark execution environment
+
+Docker runs generated code and repository tests; model inference stays in the existing host engine. The containers receive no model files, user checkout, credentials, or Docker socket. Task execution has no network access, drops Linux capabilities, and is limited to 2 CPU cores, 4 GiB RAM, and 256 processes. The repository grader uses a second fresh container. First preparation checks that each reference fix passes and that its unfixed baseline fails before making that subset runnable.
+
+Install Docker on an existing Ubuntu machine:
+
+```bash
+sudo /bin/bash scripts/install-benchmark-docker.sh --user "$(id -un)"
+```
+
+The installer enables Docker at startup and adds the named user to the Docker group, which grants root-equivalent control. Lumen uses `sg` to activate that already-granted membership in an older login session; Ubuntu 26.04's missing login utility is installed when necessary. New installations can use `./scripts/setup-ubuntu.sh --model-dir "/path/to/models" --with-benchmarks`.
+
+In Lumen, click **Prepare benchmark** for each coding mode. The first build/pulls can take several minutes and several GB of disk space. Preparation is cancellable, and completed Docker layers are reused on retry. A failed environment check is shown as a setup error, never a model failure. EvalPlus 0.3.1 and SWE-bench 3.0.15 are isolated in the evaluator image, and its actual installed dependencies and image ID are archived. Subsets are selected deterministically using `lumen-coding-v1`; the resolved dataset revision is pinned in the cached manifest. Avoid clearing Docker images needed by a prepared subset; if an image is removed, rerun preparation.
 
 The **Thinking** selector above the message box applies to the next message, even after loading the model. **Model default** leaves reasoning to the checkpoint's chat template; **Off** and native effort levels appear only when identified in that template. The current Qwen3.8 Flash Next template offers Low, Medium and Extra high (default); both DeepSeek V4 Flash templates offer Low (default), High and Max. Other checkpoints may offer different choices. Effort levels are model instructions, not fixed token budgets.
 

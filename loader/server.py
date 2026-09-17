@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
+import getpass
 import signal
 import socket
 import sqlite3
@@ -16,8 +18,8 @@ import time
 from typing import Literal
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Query
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 import psutil
@@ -27,6 +29,7 @@ from .library import scan
 from .metrics import Telemetry, number
 from .reasoning import ReasoningEffort, reasoning_kwargs
 from .tool_calls import ToolRequest, ToolCallAccumulator, ToolResponseError, validate_tool_history
+from .benchmarks import EvaluationManager, report_markdown
 
 MODEL_ROOT = Path(os.environ.get('LUMEN_MODEL_ROOT', Path.home() / 'models')).expanduser()
 STATE = Path(os.environ.get('LUMEN_STATE', RUNTIME / 'state'))
@@ -80,6 +83,7 @@ class Supervisor:
         self.settings = None
         self.model = None
         self.effective = None
+        self.launch_configuration = None
         self.engine = None
         self.token = None
         self.port = None
@@ -107,7 +111,7 @@ class Supervisor:
                     effective=self.effective, engine=self.engine, started=self.started,
                     elapsed_seconds=round(time.time() - self.started, 1) if self.started else 0,
                     latest_log=self.logs[-1] if self.logs else None, last_usage=self.last_usage,
-                    busy=self.generation_lock.locked(), benchmark=self.benchmark,
+                    busy=self.generation_lock.locked() or evaluations.active, benchmark=self.benchmark, evaluation=evaluations.snapshot(),
                     tool_calling={'enabled': bool(self.tool_format), 'format': self.tool_format,
                                   'choices': ['auto', 'none'] if self.tool_format else ['none']})
 
@@ -129,6 +133,7 @@ class Supervisor:
         await self._terminate()
         self.state, self.error = 'idle', None
         self.model = self.settings = self.effective = self.engine = self.started = None
+        self.launch_configuration = None
         self.tool_format = None
 
     async def _terminate(self):
@@ -154,6 +159,8 @@ class Supervisor:
 
     async def start(self, settings):
         async with self.operation:
+            if evaluations.active or evaluations.preparing:
+                raise HTTPException(409, 'Stop the benchmark or its preparation before loading another model.')
             model = self.lookup(settings.model_id)
             engine = validate(settings, model)
             if telemetry.value.get('gpu') is None:
@@ -195,6 +202,10 @@ class Supervisor:
                 self.port = sock.getsockname()[1]
             self.token = secrets.token_urlsafe(32)
             args, env, requested = launch(self.settings, self.model, run_dir, self.port, self.token)
+            self.launch_configuration = dict(arguments=[arg.replace(self.token, '[internal engine key]') for arg in args],
+                requested=requested, environment={key: env.get(key) for key in (
+                    'OMP_NUM_THREADS', 'EXL3_MOE_PINNED_ARENA', 'EXL3_HOST_MEM_RESERVE_MB', 'CC',
+                    'CUDA_VISIBLE_DEVICES', 'TOKENIZERS_PARALLELISM')})
             self.tool_format = requested.get('model', {}).get('tool_format') if self.engine == 'exl3' else None
             save_json(run_dir / 'profile.json', self.settings.model_dump())
             self.proc = await asyncio.create_subprocess_exec(*args, cwd=run_dir, env=env, start_new_session=True,
@@ -248,6 +259,10 @@ class Supervisor:
             await asyncio.sleep(1)
 
     def check_request(self, messages, max_output=None, reasoning_effort=None, tool_request=None):
+        if evaluations.active and asyncio.current_task() != evaluations.task:
+            raise HTTPException(409, 'The model is reserved for a benchmark. Stop it before chatting.')
+        if self.benchmark_task and not self.benchmark_task.done() and asyncio.current_task() != self.benchmark_task:
+            raise HTTPException(409, 'The model is reserved for a speed benchmark.')
         if self.state != 'ready':
             raise ValueError('Load a model before sending a message.')
         if self.generation_lock.locked():
@@ -381,10 +396,12 @@ class Supervisor:
 
 
 supervisor = Supervisor()
+evaluations = EvaluationManager(STATE, supervisor, telemetry)
 
 
 @asynccontextmanager
 async def lifespan(app):
+    global evaluations
     STATE.mkdir(parents=True, exist_ok=True)
     STATE.chmod(0o700)
     lock = (STATE / 'manager.lock').open('a')
@@ -394,6 +411,9 @@ async def lifespan(app):
         raise RuntimeError('Lumen is already running.')
     with db():
         pass
+    evaluations = EvaluationManager(STATE, supervisor, telemetry)
+    evaluations.recover()
+    await evaluations.cleanup_stale()
     try:
         await supervisor.refresh()
     except Exception as exc:
@@ -402,6 +422,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        await evaluations.stop()
         await supervisor.stop()
         for task in tasks:
             task.cancel()
@@ -468,18 +489,26 @@ async def load(settings: Settings):
 
 @app.post('/api/unload')
 async def unload():
+    if evaluations.active:
+        raise HTTPException(409, 'Stop the benchmark before unloading its model.')
     await supervisor.stop()
     return supervisor.snapshot()
 
 
 @app.post('/api/cancel')
 async def cancel():
+    if evaluations.active:
+        await evaluations.stop()
+        return {'status': 'cancelled'}
     supervisor.cancel.set()
+    if supervisor.benchmark_task and not supervisor.benchmark_task.done():
+        supervisor.benchmark_task.cancel()
     return {'status': 'cancelling'}
 
 
 @app.post('/api/quit')
 async def quit_app(background: BackgroundTasks):
+    await evaluations.stop()
     await supervisor.stop()
     async def shutdown():
         await asyncio.sleep(0.3)
@@ -693,12 +722,81 @@ async def benchmarks():
         return [json.loads(row[0]) for row in connection.execute('SELECT data FROM benchmarks ORDER BY created DESC LIMIT 100')]
 
 
+class EvaluationRequest(BaseModel):
+    suite: Literal['humaneval', 'swebench']
+    model_id: str
+    budget_minutes: int = Field(30, ge=5, le=30)
+
+
+class PreparationRequest(BaseModel):
+    suite: Literal['humaneval', 'swebench']
+
+
+@app.get('/api/evaluations/status')
+async def evaluation_status():
+    return await evaluations.availability()
+
+
+@app.get('/api/evaluations')
+async def evaluation_list(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0),
+                          suite: Literal['humaneval', 'swebench'] | None = None, q: str = Query('', max_length=200)):
+    return evaluations.list(limit, offset, suite, q)
+
+
+@app.get('/api/evaluations/install-instructions')
+async def evaluation_install_instructions():
+    return {'command': shlex.join(['pkexec', '/bin/bash', str(PROJECT / 'scripts/install-benchmark-docker.sh'), '--user', getpass.getuser()])}
+
+
+@app.post('/api/evaluations/prepare', status_code=202)
+async def evaluation_prepare(body: PreparationRequest):
+    return await evaluations.prepare(body.suite)
+
+
+@app.post('/api/evaluations', status_code=202)
+async def evaluation_start(body: EvaluationRequest):
+    return await evaluations.start(body.suite, body.model_id, body.budget_minutes * 60)
+
+
+@app.post('/api/evaluations/stop')
+async def evaluation_stop():
+    await evaluations.stop()
+    return {'status': 'stopped'}
+
+
+@app.get('/api/evaluations/{run_id}')
+async def evaluation_detail(run_id: str):
+    return evaluations.get(run_id)
+
+
+@app.get('/api/evaluations/{run_id}/report')
+async def evaluation_report(run_id: str):
+    result = evaluations.get(run_id)
+    return PlainTextResponse(report_markdown(result), headers={'Content-Disposition': f'attachment; filename="lumen-{run_id}.md"'})
+
+
+@app.get('/api/evaluations/{run_id}/json')
+async def evaluation_json(run_id: str):
+    return JSONResponse(evaluations.get(run_id), headers={'Content-Disposition': f'attachment; filename="lumen-{run_id}.json"'})
+
+
+@app.get('/api/evaluations/{run_id}/archive')
+async def evaluation_archive(run_id: str):
+    result = evaluations.get(run_id)
+    if result['state'] == 'running':
+        raise HTTPException(409, 'Stop or finish this run before downloading its complete archive.')
+    path = await asyncio.to_thread(evaluations.archive, run_id)
+    return FileResponse(path, media_type='application/zip', filename=f'lumen-{run_id}.zip')
+
+
 class BenchmarkRequest(BaseModel):
     reasoning_effort: ReasoningEffort | None = None
 
 
 @app.post('/api/benchmark', status_code=202)
 async def benchmark(body: BenchmarkRequest | None = None):
+    if evaluations.active or evaluations.preparing:
+        raise HTTPException(409, 'Stop the coding benchmark or preparation before running a speed test.')
     if supervisor.state != 'ready' or supervisor.generation_lock.locked() or (supervisor.benchmark_task and not supervisor.benchmark_task.done()):
         raise ValueError('Load a model and finish the current request before benchmarking.')
     effort = body.reasoning_effort if body and body.reasoning_effort is not None else supervisor.settings.reasoning_effort

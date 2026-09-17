@@ -1,0 +1,270 @@
+"""Lifecycle and protocol tests; real Docker grader checks live in verify_benchmarks.py."""
+import asyncio
+import json
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import zipfile
+
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+import pytest
+
+from loader import benchmarks as b, server
+from loader.engines import Settings
+
+
+def manager(tmp_path, monkeypatch):
+    model_dir = tmp_path / 'model with spaces'
+    model_dir.mkdir(exist_ok=True)
+    (model_dir / 'config.json').write_text('{"quant":4.05}')
+    settings = Settings(model_id='test', prediction='mtp', draft_tokens=3, kv='Q4', vision=True)
+    supervisor = SimpleNamespace(state='ready', model=dict(id='test', title='Test model', name='Test-4.05bpw',
+        quant='4.05 bpw', format='EXL3', path=str(model_dir)), settings=settings,
+        generation_lock=asyncio.Lock(), benchmark_task=None, engine='exl3',
+        effective={'cache_mode': 'Q4', 'api_key': 'NEVER_EXPORT', 'draft': {'draft_num_tokens': 3}})
+    mgr = b.EvaluationManager(tmp_path, supervisor, SimpleNamespace(value={'gpu': {'name': 'Test GPU'}}))
+    mgr.command = AsyncMock(return_value=(0, ''))
+    monkeypatch.setattr(b, 'runtime_identity', lambda engine: {'engine': engine, 'version': 'test'})
+    manifest = dict(dataset='HumanEval+', revision='test-revision', worker_image='sha256:fixture',
+        selection=b.PROTOCOL, tasks=[dict(id=f'HumanEval/{n}', prompt='def f(): ...') for n in range(3)])
+    manifest['fingerprint'] = b.digest(manifest)
+    b.atomic_json(mgr.assets / 'humaneval.json', manifest)
+    return mgr
+
+
+def test_config_snapshot_archive_and_score(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        settings = mgr.supervisor.settings.model_dump()
+        (tmp_path / 'profiles.json').write_text(json.dumps([dict(id='profile1', name='My quant', settings=settings)]))
+        async def human(index, source, task, manifest):
+            mgr.artifact(index, 'solution.py', 'def f(): return 1')
+            task.update(state='passed' if index < 2 else 'failed', grade={'passed': index < 2})
+        mgr.human = human
+        result = await mgr.start('humaneval', 'test', 300)
+        mgr.supervisor.settings.kv = 'FP16'
+        mgr.supervisor.model['quant'] = 'changed later'
+        await mgr.task
+        saved = mgr.get(result['id'])
+        assert saved['state'] == 'complete'
+        assert saved['summary']['score'] == 66.7
+        assert saved['settings'] == settings and saved['settings']['kv'] == 'Q4'
+        assert saved['model']['quant'] == '4.05 bpw'
+        assert saved['profiles'] == [dict(id='profile1', name='My quant')]
+        report = b.report_markdown(saved)
+        assert 'NEVER_EXPORT' not in report
+        for field in settings:
+            assert f'"{field}"' in report
+        assert saved['model_identity']['files'][0]['sha256']
+        assert 'local subset' in report.lower()
+        mgr.artifact(0, 'outside.txt', 'original')
+        root = mgr.root / result['id']
+        (root / 'unsafe-link').symlink_to(tmp_path / 'profiles.json')
+        with zipfile.ZipFile(mgr.archive(result['id'])) as archive:
+            assert 'unsafe-link' not in archive.namelist()
+            assert {'report.md', 'report.json', 'task-01/solution.py'} <= set(archive.namelist())
+        assert mgr.list()['total'] == 1
+        assert mgr.list(query='4.05')['total'] == 1
+        assert mgr.list(query='%')['total'] == 0
+        assert mgr.list(suite='swebench')['total'] == 0
+        assert mgr.list(query='unrelated')['all_total'] == 1
+        assert mgr.list(offset=1)['items'] == []
+    asyncio.run(check())
+
+
+def test_timeout_errors_and_unattempted_are_not_failed_tests(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        async def human(index, source, task, manifest):
+            if index == 0:
+                task['state'] = 'passed'
+            elif index == 1:
+                raise TimeoutError()
+            else:
+                raise RuntimeError('Grader unavailable')
+        mgr.human = human
+        await mgr.start('humaneval', 'test', 300)
+        await mgr.task
+        s = mgr.current['summary']
+        assert (s['passed'], s['failed'], s['timed_out'], s['errors'], s['score']) == (1, 0, 1, 1, None)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('immediate', [True, False])
+def test_cancel_archives_and_releases_model(tmp_path, monkeypatch, immediate):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        entered = asyncio.Event()
+        async def human(index, source, task, manifest):
+            task['state'] = 'generating'
+            entered.set()
+            await asyncio.Event().wait()
+        mgr.human = human
+        await mgr.start('humaneval', 'test', 300)
+        if not immediate:
+            await entered.wait()
+        await mgr.stop()
+        assert not mgr.active
+        saved = mgr.get(mgr.current['id'])
+        assert saved['state'] == 'cancelled'
+        assert all(t['state'] in b.TERMINAL_TASKS for t in saved['tasks'])
+        assert saved['summary']['score'] is None
+        assert saved['summary']['unattempted'] == (3 if immediate else 2)
+    asyncio.run(check())
+
+
+def test_total_deadline_preserves_completed_task(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        async def human(index, source, task, manifest):
+            if index == 0:
+                task['state'] = 'passed'
+            else:
+                task['state'] = 'generating'
+                await asyncio.Event().wait()
+        mgr.human = human
+        await mgr.start('humaneval', 'test', 20.03)
+        await asyncio.wait_for(mgr.task, 1)
+        assert mgr.current['state'] == 'timed_out'
+        assert [t['state'] for t in mgr.current['tasks']] == ['passed', 'timed_out', 'unattempted']
+        assert mgr.current['summary']['score'] is None
+    asyncio.run(check())
+
+
+def test_partial_answer_survives_generation_timeout(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        async def stream(*args, **kwargs):
+            yield {'type': 'token', 'text': 'def f():', 'reasoning': 'Plan'}
+            await asyncio.Event().wait()
+        mgr.supervisor.stream = stream
+        async def human(index, source, task, manifest):
+            task['state'] = 'generating'
+            async with asyncio.timeout(.01):
+                await mgr.generate([], task, index)
+        mgr.human = human
+        await mgr.start('humaneval', 'test', 300)
+        await mgr.task
+        answer = json.loads((mgr.root / mgr.current['id'] / 'task-01/answer.json').read_text())
+        assert answer == dict(role='assistant', content='def f():', reasoning_content='Plan', complete=False)
+        assert mgr.current['summary']['timed_out'] == 3
+    asyncio.run(check())
+
+
+def test_restart_recovers_interrupted_archive(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        await mgr.start('humaneval', 'test', 300)
+        await mgr.stop()
+        result = mgr.current
+        result['state'] = 'running'
+        result['tasks'][0]['state'] = 'passed'
+        result['tasks'][1]['state'] = 'generating'
+        mgr.save()
+        second = manager(tmp_path, monkeypatch)
+        second.recover()
+        saved = second.get(result['id'])
+        assert saved['state'] == 'interrupted'
+        assert [t['state'] for t in saved['tasks']] == ['passed', 'cancelled', 'unattempted']
+    asyncio.run(check())
+
+
+def test_rejects_changed_assets_model_and_concurrent_runs(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match='Load the model'):
+            await mgr.start('humaneval', 'wrong', 300)
+        await mgr.start('humaneval', 'test', 300)
+        with pytest.raises(HTTPException) as exc:
+            await mgr.start('humaneval', 'test', 300)
+        assert exc.value.status_code == 409
+        await mgr.stop()
+        path = mgr.assets / 'humaneval.json'
+        data = json.loads(path.read_text())
+        data['tasks'][0]['id'] = 'tampered'
+        b.atomic_json(path, data)
+        with pytest.raises(ValueError, match='assets changed'):
+            await mgr.start('humaneval', 'test', 300)
+        with pytest.raises(HTTPException):
+            mgr.get('../outside')
+    asyncio.run(check())
+
+
+def test_setup_rechecks_busy_state_after_preflight(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        async def availability():
+            await mgr.supervisor.generation_lock.acquire()
+            return {'docker': True}
+        mgr.availability = availability
+        with pytest.raises(HTTPException):
+            await mgr.prepare('humaneval')
+        assert not mgr.preparing
+    asyncio.run(check())
+
+
+def test_command_timeout_kills_process_and_bounds_output(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        del mgr.command
+        with pytest.raises(TimeoutError):
+            await mgr.command(sys.executable, '-c', 'import time; time.sleep(60)', timeout=.05)
+        code, output = await mgr.command(sys.executable, '-c', 'print("x" * 4100000)')
+        assert code == 0 and len(output) < 4_000_100 and output.startswith('[Earlier output truncated]')
+    asyncio.run(check())
+
+
+def test_export_api_and_limits(tmp_path, monkeypatch):
+    mgr = manager(tmp_path, monkeypatch)
+    async def prepare():
+        await mgr.start('humaneval', 'test', 300)
+        await mgr.stop()
+    asyncio.run(prepare())
+    monkeypatch.setattr(server, 'evaluations', mgr)
+    client = TestClient(server.app)  # Isolated routes, no production lifespan.
+    run_id = mgr.current['id']
+    assert client.get('/api/evaluations?limit=101').status_code == 422
+    assert client.get('/api/evaluations?offset=-1').status_code == 422
+    assert client.post('/api/evaluations', json={}).status_code == 403
+    assert client.post('/api/evaluations', json=dict(suite='humaneval', model_id='test', budget_minutes=31), headers={'X-Lumen-Local':'1'}).status_code == 422
+    assert client.get(f'/api/evaluations/{run_id}/report').status_code == 200
+    assert client.get(f'/api/evaluations/{run_id}/json').json()['settings']['draft_tokens'] == 3
+    assert client.get(f'/api/evaluations/{run_id}/archive').headers['content-type'] == 'application/zip'
+    mgr.current['state'] = 'running'
+    mgr.save()
+    assert client.get(f'/api/evaluations/{run_id}/archive').status_code == 409
+
+
+def test_strict_agent_action_and_python_extraction():
+    assert b.parse_action('```json\n{"command":"printf hello"}\n```') == {'command': 'printf hello'}
+    for value in ['{"command":"x","finish":true}', '[]', '{"command":3}', '{"finish":false}']:
+        with pytest.raises(ValueError):
+            b.parse_action(value)
+    assert b.extract_python('Here is code:\n```python\ndef f(): return 3\n```') == 'def f(): return 3'
+
+
+def test_repository_agent_deadline_stops_commands_before_grading(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        manifest = dict(dataset='SWE-bench Lite', revision='fixture', worker_image='sha256:worker',
+            tasks=[dict(id='repo__issue-1', prompt='Fix this', base_commit='a' * 40, image_id='sha256:repo')])
+        manifest['fingerprint'] = b.digest(manifest)
+        b.atomic_json(mgr.assets / 'swebench.json', manifest)
+        mgr.new_repository = AsyncMock(return_value='disposable-agent')
+        mgr.generate = AsyncMock(side_effect=TimeoutError())
+        mgr.grade_repository = AsyncMock(return_value=({'passed': True}, 'Official passing test report'))
+        async def command(*args, **kwargs):
+            return 0, 'diff --git a/f.py b/f.py\n' if args[:2] == ('docker', 'exec') else ''
+        mgr.command = AsyncMock(side_effect=command)
+        await mgr.start('swebench', 'test', 300)
+        await mgr.task
+        task = mgr.current['tasks'][0]
+        assert task['state'] == 'passed' and 'grading the current patch' in task['agent_limit']
+        calls = [call.args for call in mgr.command.call_args_list]
+        kill = next(i for i, c in enumerate(calls) if c[:2] == ('docker', 'kill'))
+        restart = next(i for i, c in enumerate(calls) if c[:2] == ('docker', 'start'))
+        diff = next(i for i, c in enumerate(calls) if c[:2] == ('docker', 'exec'))
+        assert kill < restart < diff
+        assert mgr.grade_repository.await_args.args[1].startswith('diff --git')
+    asyncio.run(check())
