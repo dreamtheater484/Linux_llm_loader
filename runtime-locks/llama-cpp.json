@@ -1,0 +1,14 @@
+{
+  "release": "b11050",
+  "platform": "ubuntu-cuda-12.8-x64",
+  "assets": [
+    {
+      "name": "llama-b11050-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "sha256": "8285d2de5e2ce6fd3695f5506022cc897fcab0a09f6493a1f68b384d624d0d93"
+    },
+    {
+      "name": "cudart-llama-b11050-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "sha256": "fa4c4a54927c813df7e67adcaa623deca6d2c020fbf3b8032eac171368bbd865"
+    }
+  ]
+}

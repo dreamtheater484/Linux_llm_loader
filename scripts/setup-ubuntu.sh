@@ -9,6 +9,7 @@ mount_device="${LUMEN_MOUNT_DEVICE:-}"
 install_desktop=1
 preflight_only=0
 install_benchmarks=0
+install_llama=0
 
 usage() {
     cat <<'EOF'
@@ -23,6 +24,7 @@ Optional:
   --no-desktop           Configure Lumen without an application-menu shortcut
   --preflight-only       Check the machine and arguments without installing
   --with-benchmarks      Install Docker, enable its service, and grant this user Docker-group access
+  --with-llama           Install the pinned CUDA llama.cpp runtime for GGUF and embedded MTP
   -h, --help             Show this help
 EOF
 }
@@ -35,6 +37,7 @@ while (($#)); do
         --no-desktop) install_desktop=0; shift ;;
         --preflight-only) preflight_only=1; shift ;;
         --with-benchmarks) install_benchmarks=1; shift ;;
+        --with-llama) install_llama=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -167,6 +170,9 @@ fi
     echo 'The compiled interface is missing from this checkout.' >&2; exit 1;
 }
 LUMEN_RUNTIME="$runtime_dir" "$exl_dir/bin/python" "$project_dir/scripts/probe_runtime.py"
+if ((install_llama)); then
+    "$manager_dir/bin/python" "$project_dir/scripts/install-llama.py" --runtime-dir "$runtime_dir"
+fi
 
 desktop_args=(--model-dir "$model_dir")
 [[ -n "$mount_device" ]] && desktop_args+=(--mount-device "$mount_device")

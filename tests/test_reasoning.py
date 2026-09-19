@@ -85,6 +85,10 @@ def engine_client(calls):
         calls.append((request.url.path, body))
         if request.url.path.endswith('/token/encode'):
             return httpx.Response(200, json={'length': 25})
+        if request.url.path == '/apply-template':
+            return httpx.Response(200, json={'prompt': 'Formatted prompt'})
+        if request.url.path == '/tokenize':
+            return httpx.Response(200, json={'tokens': list(range(25))})
         events = [
             {'choices': [{'delta': {'reasoning_content': 'Reasoning'}}]},
             {'choices': [{'delta': {'content': 'Answer'}, 'finish_reason': 'stop'}]},

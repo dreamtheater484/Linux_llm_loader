@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 
 SEED = 'lumen-coding-v1'
+HUMAN_SELECTION = 'lumen-humaneval-80-v1'
 # Requests' historical tests depend on public HTTP services. Keep the fixed
 # offline subset explicit and versioned; never omit failing upstream tests.
 SWE_SELECTION = 'lumen-swe-offline-v2'
@@ -33,17 +34,17 @@ def dependencies():
 def human_data():
     from evalplus.data import get_human_eval_plus, get_human_eval_plus_hash
     from evalplus.evaluate import get_groundtruth
-    selected = choose(list(get_human_eval_plus().values()), 'task_id', 20)
+    selected = choose(list(get_human_eval_plus().values()), 'task_id', 80)
     problems = {p['task_id']: p for p in selected}
     dataset_hash = get_human_eval_plus_hash()
-    expected = get_groundtruth(problems, dataset_hash + '-lumen-v1', [])
+    expected = get_groundtruth(problems, dataset_hash + '-lumen-80-v1', [])
     return problems, expected, dataset_hash
 
 
 def human_manifest():
     problems, _, dataset_hash = human_data()
     return dict(dataset='HumanEval+', revision='v0.1.10', upstream_hash=dataset_hash,
-                selection=SEED, dependencies=dependencies(),
+                selection=HUMAN_SELECTION, dependencies=dependencies(),
                 tasks=[dict(id=p['task_id'], prompt=p['prompt'], entry_point=p['entry_point']) for p in problems.values()])
 
 

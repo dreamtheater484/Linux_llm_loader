@@ -1,6 +1,6 @@
 # Lumen · local model workbench
 
-Lumen is a local Ubuntu interface for running large language models with a small set of understandable controls. It currently ships a qualified **ExLlamaV3 1.5.0 + TabbyAPI** path for EXL3 checkpoints. Adapters for vLLM safetensors and llama.cpp GGUF models are visible only when those engines are installed separately.
+Lumen is a local Ubuntu interface for running large language models with a small set of understandable controls. It ships a qualified **ExLlamaV3 1.5.0 + TabbyAPI** path for EXL3 checkpoints and an optional pinned **llama.cpp b11050 / CUDA 12.8** runtime for GGUF models, including embedded Qwen MTP. The vLLM safetensors adapter still requires separate installation and qualification.
 
 The interface includes streaming text and image chat, 256K context profiles, Q8/FP16/Q4 KV choices, vision and MTP controls, saved profiles, repeatable benchmarks, and live GPU power, CPU package power, VRAM, RAM, CPU load, prompt-processing speed, decode speed, and first-token time.
 
@@ -136,34 +136,49 @@ The device path is written only to `~/.config/lumen/config.json`; it is never ad
 ## Using the workbench
 
 1. Select a model in the library.
-2. Keep **256K**, **Q8 KV**, and **Vision** where the checkpoint supports them.
+2. Start with **256K** for the qualified EXL3 profiles or **32K** for GGUF, **Q8 KV**, and **Vision** where a compatible component is identified. Increasing context also increases memory use.
 3. Choose an MTP length and CPU expert share from a saved or recommended profile.
 4. Click **Load model** and wait for the ready state.
 5. Type a message, drag in an image, choose an image file, or paste a screenshot with **Ctrl+V**.
-6. Use **Benchmarks** for timed coding evaluations, an archive with comparison and report exports, or the original prompt-processing and decode speed test.
-7. Click **Save profile** to name the current setup. Saved profiles can be loaded, edited, renamed, deleted, restored, or saved as a copy. Each card also shows its complete reusable JSON configuration with a one-click **Copy config** button.
+6. Use **Benchmarks** for coding evaluations, an archive with comparison and report exports, or the original prompt-processing and decode speed test.
+7. Click **Save profile** to keep the current setup. Profiles start collapsed, with compact automatic names showing the model, weight quant, context/cache precision, measured decode speed when available, vision, MTP, and CPU share. Drag the grip to reorder them; keyboard arrows and expanded move buttons work too. **Duplicate** creates an independent copy. Expand a row to edit, rename, view matching benchmark results, delete, or copy its full JSON configuration. Deleted profiles can be restored. Automatic names follow settings and benchmark changes; custom names remain available.
+8. Loading displays a prominent banner with the requested model, elapsed time, engine logs, and cancellation. When the engine verifies readiness, a persistent **Ready to chat** message names the loaded model and its context, vision, and MTP settings.
+
+Profile cards show the full model variant and quant, generation and prefill speeds, context/KV precision, and recorded VRAM/RAM totals. Search by model/quant/profile; filter minimum speeds, exact context, and maximum memory; sort by model, either speed, context, or memory. Reset filters and choose saved order to drag again. Profiles poll the benchmark archive every three seconds, including coding evaluations and legacy speed timings. Each speed uses the newest valid measurement from a completed or time-limited benchmark with matching settings, with its source/date shown. Missing measurements remain blank.
+
+Memory is sampled once the loaded engine has been ready for at least three seconds and inference/benchmarks are idle. It records **total system VRAM/RAM usage**, including other applications, rather than claiming a model-only allocation. The timestamp is available on hover. Values persist in the results database and are shared by copies with identical loading settings. Changing context, KV, placement, or other loading settings requires a new measurement; sampling-only changes retain it.
+
+Profile speed uses matching effective engine and generation settings. Results for the same model with different settings appear separately inside the expanded profile. Speed tests use three short prompts and 512-token output limits; their numbers are not long-context throughput guarantees.
 
 The conversation follows new output automatically. Scrolling away pauses tail following; **Jump to latest** resumes it. Closing the browser tab leaves the local server running. **Unload model** frees model RAM and VRAM. **Quit Lumen** stops the server.
 
-## Coding benchmarks in 30 minutes or less
+## Coding benchmarks
 
-Open **Benchmarks → Run a benchmark**, choose a test, and prepare its environments once. Load the model/profile you want to measure, check the displayed configuration, choose a 10-, 20-, or 30-minute maximum, and start. Preparation downloads are outside the timer; timed runs use cached data and containers. **Stop & archive** retains completed results and available partial answers.
+Open **Benchmarks → Run a benchmark**, choose a test, and prepare its environments once. Load the model/profile you want to measure and check the displayed configuration. HumanEval+ uses Short for 20 problems, Medium for 40, and Long for 80. For repository coding, the labels select one, two, or three repositories. Neither mode imposes a normal generation, task, or whole-run timer. Preparation downloads are outside the run. **Stop & discard** cancels the test and removes that run and its temporary artifacts. Running checkpoints are kept only for live progress; cancelled and interrupted runs are excluded from the archive and removed, including after a restart.
 
 | Mode | What it measures | Fixed local subset |
 |---|---|---|
-| Quick coding | Writing correct Python functions, checked with the original and extended [EvalPlus](https://github.com/evalplus/evalplus) tests | 20 HumanEval+ problems; up to 90 seconds per problem |
-| Repository coding | Inspecting and fixing real codebases with Lumen's bash agent, then grading in a fresh checkout with the official [SWE-bench](https://github.com/SWE-bench/SWE-bench) harness | 10 minutes: Pylint; 20 minutes: Pylint + Flask; 30 minutes: Pylint + Flask + pytest; one fixed SWE-bench Lite issue per repository |
+| Quick coding | Writing correct Python functions, checked with the original and extended [EvalPlus](https://github.com/evalplus/evalplus) tests | Short: 20; Medium: 40; Long: 80 HumanEval+ problems |
+| Repository coding | Inspecting and fixing real codebases with Lumen's bash agent, then grading in a fresh checkout with the official [SWE-bench](https://github.com/SWE-bench/SWE-bench) harness | Short: Pylint; Medium: Pylint + Flask; Long: Pylint + Flask + pytest |
 | Speed test | Prompt-processing and decode throughput, without grading answers | The existing three prompts |
 
-The short coding modes are practical alternatives to a lengthy DeepSWE run. They are **not DeepSWE or LiveBench implementations** and their scores are not full-suite or official leaderboard results. The repository runner is Lumen's own JSON/bash agent, with one attempt and at most 40 turns. It works without requiring a checkpoint-specific native tool parser. Each preset selects only the repositories it has time for. It reserves time within the remaining run budget to capture and grade the latest patch, gives the agent remaining-time/action feedback, and saves a patch checkpoint after every command. The archive and copied report show when the agent ran out of actions or produced no patch. Preset task IDs and subset fingerprints are recorded; compare scores only across the same subset and conditions. Vision remains in the recorded configuration, but these are text-only coding tests, not a vision evaluation.
+The coding modes are practical alternatives to a lengthy full-suite run. They are **not DeepSWE or LiveBench implementations** and their scores are not full-suite or official leaderboard results. HumanEval+ uses deterministic nested prefixes: Medium contains all 20 Short problems plus 20 more, and Long contains all 40 Medium problems plus 40 more. Repository coding also uses deterministic prefixes: Short runs Pylint, Medium adds Flask, and Long adds pytest. Both modes have no model-generation, per-task, or whole-run wall-clock cutoff; each answer may finish naturally. HumanEval+'s isolated grader retains a 120-second safety ceiling for generated code that hangs. Repository shell commands retain a 45-second ceiling and its isolated grader retains a 150-second ceiling. The repository runner is Lumen's own JSON/bash agent, with one attempt and at most 40 turns. The archive and copied report show when the agent ran out of actions or produced no patch. Preset task IDs and subset fingerprints are recorded; compare scores only across the same subset and conditions. Vision remains in the recorded configuration, but these are text-only coding tests, not a vision evaluation.
 
-**Reading results:** passed tasks satisfy the upstream tests; failed tests are distinct from runner errors, time limits, and unattempted tasks. Aggregate accuracy appears only when every selected task has a grading result. Partial runs show passed/selected and grading coverage. Time limits measure speed and quality together; a small subset is a quick comparison, not a precise ranking. Generation uses the loaded maximum output, temperature, and reasoning choice. Output limits include reasoning. Sampling defaults other than temperature remain the installed engine's defaults, and results can vary across repeated runs.
+**Live output:** coding and speed benchmarks open a floating terminal with streamed answers, thinking, agent commands, command/test output, and progress. Scroll up or disable **Follow tail** to pause scrolling; **Jump to latest** resumes it. Expand to full screen or minimize it while working elsewhere. The tail retains up to 1,048,576 characters in memory and is discarded for aborted runs. Completed coding runs keep full artifacts in their archive. A completion popup names the model, shows scores when available and both speeds, and opens the full results.
+
+SWE-bench issues are individually resolved or unresolved, without partial credit. A fully graded Short run has one issue (0% or 100%); Medium has two (0%, 50%, or 100%); Long has three (0%, 33.3%, 66.7%, or 100%).
+
+**Reading results:** passed tasks satisfy the upstream tests; failed tests are distinct from runner errors, grader safety timeouts, and unattempted tasks. Aggregate accuracy appears only when every selected task has a grading result. Partial runs show passed/selected and grading coverage. A small subset is a quick comparison, not a precise ranking. Generation uses the loaded maximum output, temperature, and reasoning choice. Output limits include reasoning. Sampling defaults other than temperature remain the installed engine's defaults, and results can vary across repeated runs.
 
 **Archive and sharing:** every run records the model name, path, quantization, model ID, file metadata and available download receipt; all settings including context, KV precision, MTP and draft length, vision, reasoning, output cap, temperature, CPU placement/threads, and chunk size; effective and requested engine configuration; runtime packages/source fingerprints; hardware; dataset revision, immutable Docker image IDs, task IDs, prompts, limits, timings, and available generation metrics. File metadata fingerprints are not full weight checksums; small model configuration/template files are hashed. Saved-profile names are captured when their configuration matches exactly.
 
 Use **Archive** to search by model or quantization, inspect individual tasks, or compare two runs. **Copy full report** produces Markdown suitable for pasting elsewhere; Markdown, JSON, and ZIP downloads are also available. ZIPs include available answers, reasoning, trajectories, code/patches, and grader output. Reports contain local model paths and configuration details. Their contents can be inspected before sharing. Archives survive restarts and remain available if a model/profile is later renamed or removed.
 
-Results live in `~/.local/share/linux-llm-loader/state/results.sqlite3` and `state/evaluations/<run-id>/`; cached manifests live under `state/evaluations/assets/`. Copy both the database and evaluation directory when backing up. Docker stores images in its own data directory. Nothing is uploaded by the benchmark runner. A previously interrupted run is retained with an **Interrupted** status.
+The archive uses two columns on Full HD and three on QHD, with full model names on hover. Search current library models through the live model picker, filter by suite or outcome, and sort by date or score. Speed tests have the same model filter, sorting, and deletion controls. Select individual runs or all visible results for bulk deletion/restoration. Exports and two-run comparison remain available.
+
+Coding result cards and the results dialog show **decode tok/s** and **prefill tok/s** from the saved engine timings. The dialog also shows first-token latency and per-task response speeds. Values are medians across measured responses, exclude test execution, include thinking in decoding, and reflect prompt-cache reuse for prefill. Older records are calculated from their existing response metrics; missing timings show a dash. Markdown reports and comparisons include these speeds too.
+
+Results live in `~/.local/share/linux-llm-loader/state/results.sqlite3` and `state/evaluations/<run-id>/`; cached manifests live under `state/evaluations/assets/`. Copy both the database and evaluation directory when backing up. Docker stores images in its own data directory. Nothing is uploaded by the benchmark runner. Interrupted runs are discarded on startup. Completed runs can be moved to **Recently deleted** and restored there; deleting a result also removes it from saved-profile benchmark matching.
 
 ### Install the benchmark execution environment
 
@@ -185,7 +200,7 @@ There is no separate 1K thinking cap. **Maximum output** limits thinking and the
 
 **Decode speed includes thinking tokens**, answer tokens and tool-call output. The engine counts generated token IDs before splitting the response into channels; prompt processing is separate. The pinned ExLlamaV3 1.5.0 wheel has a cumulative-counter bug after multiple output requeues: earlier tokens are omitted while elapsed generation time is retained. Setup applies `patches/exl3-cumulative-output-tokens.patch` to the installed Python module, correcting counts and reported speed for long responses without changing inference settings or token generation. See [the accounting investigation](validation/GENERATION_ACCOUNTING.md).
 
-API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, or `/v1/chat/completions`. Use `default`, `off` (or OpenAI's `none` alias on the `/v1` route), or a native level listed by the model's `reasoning.options` in `/api/library`. Omitting it uses the loaded profile's saved choice. Unsupported levels are rejected; the same template variables are used for token counting and generation. vLLM and llama.cpp integrations remain unqualified until tested with their installed engine/checkpoint versions. Their request template controls are documented by [vLLM](https://docs.vllm.ai/en/latest/features/reasoning_outputs/) and [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, or `/v1/chat/completions`. Use `default`, `off` (or OpenAI's `none` alias on the `/v1` route), or a native level listed by the model's `reasoning.options` in `/api/library`. Omitting it uses the loaded profile's saved choice. Unsupported levels are rejected; the same template variables are used for token counting and generation. llama.cpp supports exact advance counting for text and tool conversations; image token usage is reported after generation. vLLM remains unqualified. Engine template controls are documented by [vLLM](https://docs.vllm.ai/en/latest/features/reasoning_outputs/) and [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/b11050/tools/server/README.md).
 
 ## Model and engine support
 
@@ -193,15 +208,33 @@ API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, or
 |---|---|---|
 | EXL3 | ExLlamaV3 1.5.0 through pinned TabbyAPI | Installed and qualified by the setup script |
 | Native safetensors | vLLM | Adapter present; runtime and model-specific combinations are not installed or qualified |
-| GGUF | llama.cpp server | Adapter present; runtime and model-specific combinations are not installed or qualified |
+| GGUF | llama.cpp b11050, CUDA 12.8 | Optional pinned installer; Qwen3.6 35B and Qwen3.8 27B tested, including embedded 27B MTP |
 
 The current 3-bit model set uses EXL3 3.04–3.05 bpw checkpoints. EXL3 weights cannot be loaded by vLLM by changing the engine selector. Vision also requires a checkpoint with a compatible embedded vision component or projector.
+
+### llama.cpp and GGUF models
+
+On an existing installation, run:
+
+```bash
+python3 scripts/install-llama.py
+```
+
+Use `--runtime-dir PATH` for a custom runtime directory, or pass `--with-llama` to `scripts/setup-ubuntu.sh` on a fresh installation. The installer uses SHA-256-pinned official Linux x86_64 CUDA 12.8 packages and private CUDA libraries; it needs no system CUDA toolkit or driver changes. Allow 4 GiB free for installation. Restart Lumen after upgrading its application code. A custom executable can be selected with `LUMEN_GGUF_SERVER`.
+
+Choose **more local variants** in the library or search for a model to see GGUF files. Auto selects llama.cpp for them. Saved profiles retain context, cache precision, prediction mode and draft length, CPU placement, threads, prompt chunk size, sampling temperature, and thinking choice. The default GGUF context is 32K; larger contexts require separate memory and occupied-context testing. The engine must allocate exactly the requested capacity; automatic context shrinking and history shifting are disabled.
+
+For MoE models, **Fine-tune → CPU placement → Experts** keeps attention on the GPU and moves expert weights from the selected percentage of layers into RAM. **Whole layers** also moves attention and other layer work. Zero CPU share requests full GPU offload. For the 35B Q6_K_P model on a 32 GiB card, the initial setting uses 10% expert-layer offload to leave room for cache and vision; dense 27B profiles start with full GPU offload.
+
+**Prediction acceleration** enables llama.cpp's native `draft-mtp` when a supported GGUF declares embedded MTP weights. Both Qwen3.8 27B Q4_K_P and Q6_K checkpoints include them. Draft length defaults to two; the server verifies speculative decoding is active before reporting readiness, and records accepted/rejected draft counts with each response. GGUF metadata, rather than the filename, determines MTP availability. The existing HauhauCS Qwen3.6 35B Aggressive Q6_K_P has no MTP weights and runs with prediction off. No checkpoint is replaced or downloaded by engine setup. HauhauCS's separate FastMTP sidecar and patched runtime are not part of this embedded-MTP integration.
+
+Qwen thinking modes and structured tool calls use the checkpoint's native Jinja template. Matching vision projectors are discovered in the model directory or library root; ambiguous matches remain disabled. Without a matching projector, text and MTP still work. Prompt-processing speed and decode speed come from llama.cpp's native timings, with thinking included in generated-token counts. See [GGUF validation](validation/LLAMA_CPP.md) for the exact tested scope.
 
 ## OpenAI-compatible tools
 
 Clients connect to Lumen's `/v1` base URL and must send `X-Lumen-Local: 1` on POST requests. No client API key is needed. Query `/v1/models` for the loaded model ID. The internal engine remains authenticated and bound to loopback.
 
-For ExLlamaV3 Qwen3.8 Flash Next, Lumen selects TabbyAPI's `qwen3_coder` parser only when the checkpoint architecture and selected chat template match its syntax. `/api/status` reports the active `tool_calling` capability. Other model/engine combinations retain ordinary chat; requests offering tools are explicitly rejected until a compatible parser is configured.
+For ExLlamaV3 Qwen3.8 Flash Next, Lumen selects TabbyAPI's `qwen3_coder` parser only when the checkpoint architecture and selected chat template match its syntax. For supported Qwen GGUF models, llama.cpp handles parsing through the embedded Jinja template. `/api/status` reports the active `tool_calling` capability. Other model/engine combinations retain ordinary chat; requests offering tools are explicitly rejected until a compatible parser is configured.
 
 The pinned Tabby runtime includes `patches/tabby-qwen-tool-schema.patch`. It passes tool schemas to the native Qwen parser, preserves explicitly declared string parameters verbatim, and accepts `True`/`False` only for explicitly boolean parameters. Duplicate parameters are rejected and output-limit termination is preserved, so truncated calls cannot be reported as completed calls. Final arguments must still pass Lumen's JSON Schema validation.
 

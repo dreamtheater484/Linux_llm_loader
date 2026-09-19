@@ -28,15 +28,21 @@ import zipfile
 
 from fastapi import HTTPException
 from .engines import RUNTIME, TABBY, GGUF
+from .archive import ABORTED, discard_aborted, discard_run, list_runs, run_performance, with_performance
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'lumen-benchmark-tools:1'
-PROTOCOL = 'lumen-coding-v1'
+PROTOCOL = 'lumen-coding-v2'
 SUITES = {
-    'humaneval': dict(name='Quick coding', benchmark='HumanEval+', count=20, task_seconds=90,
-                     generation_seconds=60, grader_seconds=25, runner='Lumen single-answer v1'),
-    'swebench': dict(name='Repository coding', benchmark='SWE-bench Lite', count=3, task_seconds=600,
-                    generation_seconds=420, grader_seconds=150, runner='Lumen bash agent v2', selection='lumen-swe-offline-v2'),
+    'humaneval': dict(name='Quick coding', benchmark='HumanEval+', count=80,
+                     grader_seconds=120, runner='Lumen single-answer v2', selection='lumen-humaneval-80-v1'),
+    'swebench': dict(name='Repository coding', benchmark='SWE-bench Lite', count=3,
+                    grader_seconds=150, runner='Lumen bash agent v2', selection='lumen-swe-offline-v2'),
+}
+PRESETS = {
+    600: dict(id='short', label='Short', human_tasks=20, repository_tasks=1),
+    1200: dict(id='medium', label='Medium', human_tasks=40, repository_tasks=2),
+    1800: dict(id='long', label='Long', human_tasks=80, repository_tasks=3),
 }
 TERMINAL_TASKS = {'passed', 'failed', 'timed_out', 'error', 'cancelled', 'unattempted'}
 AGENT_PROMPT = """You are fixing a software issue in /testbed. Inspect the repository, implement the requested fix, and run relevant tests.
@@ -44,18 +50,38 @@ Respond with exactly one JSON object: {"command":"a bash command"} to inspect/ed
 Commands run in /testbed in a disposable container. Activate /opt/miniconda3/etc/profile.d/conda.sh and conda environment testbed when running Python tests if needed.
 Do not change tests to hide failures. Do not seek reference solutions. Your patch will be graded in a fresh environment.
 Each command has a 45-second limit. Keep commands and output focused. You have at most 40 turns.
-You will receive remaining time and action counts. Leave time to implement a patch: inspection alone does not fix the issue. Run focused tests relevant to your changes; unrelated baseline failures may exist in these historical repositories.
-Your latest saved patch is graded automatically when time or actions run out. Grading time is reserved separately."""
+You will receive the remaining action count. Inspection alone does not fix the issue, so implement a patch and run focused tests relevant to your changes; unrelated baseline failures may exist in these historical repositories.
+Your latest saved patch is graded automatically when the action limit is reached."""
 
 
 def select_repository_tasks(manifest, budget_seconds):
     if budget_seconds not in (600, 1200, 1800):
-        raise ValueError('Repository coding supports 10, 20, or 30 minutes: one fixed repository per 10 minutes.')
+        raise ValueError('Repository coding supports the Short, Medium, and Long labels.')
     selected = copy.deepcopy(manifest)
     selected['pool_fingerprint'] = selected.pop('fingerprint')
-    selected['tasks'] = selected['tasks'][:budget_seconds // 600]
+    selected['tasks'] = selected['tasks'][:preset_for(budget_seconds)['repository_tasks']]
     selected['fingerprint'] = digest(selected)
     return selected
+
+
+def preset_for(budget_seconds):
+    """Resolve the public Short/Medium/Long choice.
+
+    Older internal tests and API clients used five-minute values. Treat those as
+    Short, while the UI and current API use the three canonical values above.
+    """
+    threshold = next((seconds for seconds in PRESETS if budget_seconds <= seconds), 1800)
+    return PRESETS[threshold]
+
+
+def select_human_tasks(manifest, budget_seconds):
+    selected = copy.deepcopy(manifest)
+    selected['pool_fingerprint'] = selected.pop('fingerprint')
+    selected['tasks'] = selected['tasks'][:preset_for(budget_seconds)['human_tasks']]
+    selected['fingerprint'] = digest(selected)
+    return selected
+
+
 HUMAN_PROMPT = 'Implement the Python function below. Return a complete Python module including the function signature and any imports, inside one python code block. Do not include tests or explanations.'
 
 
@@ -105,6 +131,9 @@ def runtime_identity(engine):
     elif engine == 'gguf' and GGUF.is_file():
         stat = GGUF.stat()
         result['llama_server'] = dict(path=str(GGUF), size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+        manifest = GGUF.resolve().parent.parent / 'manifest.json'
+        if manifest.is_file():
+            result['llama_server']['release'] = json.loads(manifest.read_text())
     return result
 
 
@@ -125,18 +154,25 @@ def summarize(result):
 def report_markdown(result):
     model, settings, summary = result['model'], result['settings'], result['summary']
     title = model.get('title') or model.get('name', 'Unknown model')
+    performance = run_performance(result)
+    speed = lambda key: f"{performance[key]:.2f}" if performance[key] is not None else 'Not recorded'
+    preset = result.get('preset_label') or preset_for(result['budget_seconds'])['label']
+    timing = f"{result.get('elapsed_seconds', 0):.1f}s elapsed · {preset} preset · no run deadline"
+    scope_note = 'Local subset with one attempt per task and no model-generation, per-task, or whole-run cutoff.'
     lines = [f"# {result['benchmark']} — {title}", '',
              f"- Run: `{result['id']}` · {datetime.fromtimestamp(result['created'], timezone.utc).isoformat()}",
-             f"- State: {result['state']} · {result.get('elapsed_seconds', 0):.1f}s / {result['budget_seconds']}s budget",
+             f"- State: {result['state']} · {timing}",
              f"- Model: {model.get('name', title)} · {model.get('format', 'unknown')} · {model.get('quant', 'unknown quant')}",
              f"- Model ID: `{model.get('id')}` · fingerprint: `{result['model_fingerprint']}`",
              f"- Passed: {summary['passed']}/{summary['total']} selected tasks; graded: {summary['graded']}/{summary['total']}",
              f"- Failed: {summary['failed']} · timed out: {summary['timed_out']} · errors: {summary['errors']} · cancelled: {summary['cancelled']} · unattempted: {summary['unattempted']}",
              f"- Score: {str(summary['score']) + '%' if summary['score'] is not None else 'Incomplete — no aggregate accuracy score'}",
              f"- Recorded tokens: {summary['input_tokens']:,} input / {summary['output_tokens']:,} output (including reasoning; completed turns only)",
+             f"- Decode: {speed('decode_tps')} tok/s · prefill: {speed('prefill_tps')} tok/s (per-response medians; engine timings, excluding test execution)",
+             f"- First token: {speed('first_token_seconds')} s median; prefill timings reflect prompt-cache reuse",
              f"- Runner: {result['runner']} · protocol: `{result['protocol_hash']}`",
              f"- Dataset revision: `{result['dataset']['revision']}` · subset: `{result['dataset']['fingerprint']}`",
-             '', '> Local subset with fixed time limits and one attempt per task. This is not a full benchmark or official leaderboard score. Timed runs measure quality and speed together.',
+             '', f'> {scope_note} This is not a full benchmark or official leaderboard score.',
              '', '## Configuration', '', '```json', json.dumps(dict(settings=settings,
                  engine=result['engine'], effective=result['effective'], launch=result.get('launch'), model=model,
                  matched_profiles=result.get('profiles', []), evaluation=result['evaluation'],
@@ -184,6 +220,9 @@ class EvaluationManager:
         self.supervisor, self.telemetry = supervisor, telemetry
         self.task = None
         self.setup_task = None
+        from .live_output import LiveOutput
+        self.output = getattr(supervisor, 'live_output', None) or LiveOutput()
+        self.output_states = {}
         self.current = None
         self.setup = dict(state='idle', message='')
         self.containers = set()
@@ -203,40 +242,31 @@ class EvaluationManager:
         return db
 
     def recover(self):
-        with self.connection() as db:
-            rows = list(db.execute('SELECT data FROM evaluations'))
-        for (raw,) in rows:
-            result = json.loads(raw)
-            if result['state'] == 'running':
-                result.update(state='interrupted', error='Lumen stopped before this run finished. Completed task results were preserved.')
-                for task in result['tasks']:
-                    if task['state'] not in TERMINAL_TASKS:
-                        task.update(state='cancelled', detail='Interrupted by application restart.')
-                self.save(result)
+        # Running checkpoints belong to the previous process, so they were interrupted.
+        discard_aborted(self.state)
 
     def save(self, result=None):
         result = result or self.current
         result['summary'] = summarize(result)
+        result['performance'] = run_performance(result)
+        if self.output.meta and self.output.meta['id'] == result['id']:
+            for task in result['tasks']:
+                marker = (task['state'], task.get('detail', ''))
+                if self.output_states.get(task['id']) != marker and task['state'] != 'unattempted':
+                    self.output.append('status', f"\n{task['id']} · {task['state']} · {task.get('detail', '')}\n")
+                    self.output_states[task['id']] = marker
+            if result['state'] != 'running' and self.output.meta['state'] == 'running':
+                self.output.finish(result)
+        if result['state'] in ABORTED:
+            discard_run(self.state, 'coding', result['id'])
+            return
         atomic_json(self.root / result['id'] / 'report.json', result)
         with self.connection() as db:
             db.execute('INSERT OR REPLACE INTO evaluations VALUES (?, ?, ?)',
                        (result['id'], result['created'], json.dumps(result)))
 
-    def list(self, limit=30, offset=0, suite=None, query=''):
-        where, args = [], []
-        if suite:
-            where.append("json_extract(data, '$.suite') = ?")
-            args.append(suite)
-        if query.strip():
-            fields = ('id', 'benchmark', 'model.name', 'model.title', 'model.quant')
-            where.append('(' + ' OR '.join(f"instr(lower(coalesce(json_extract(data, '$.{field}'), '')), ?) > 0" for field in fields) + ')')
-            args.extend([query.strip().lower()] * len(fields))
-        clause = ' WHERE ' + ' AND '.join(where) if where else ''
-        with self.connection() as db:
-            total = db.execute('SELECT COUNT(*) FROM evaluations' + clause, args).fetchone()[0]
-            all_total = db.execute('SELECT COUNT(*) FROM evaluations').fetchone()[0]
-            results = [json.loads(row[0]) for row in db.execute('SELECT data FROM evaluations' + clause + ' ORDER BY created DESC LIMIT ? OFFSET ?', (*args, limit, offset))]
-        return dict(total=total, all_total=all_total, items=results, offset=offset, limit=limit)
+    def list(self, limit=30, offset=0, suite=None, query='', **filters):
+        return list_runs(self.state, 'coding', limit, offset, suite, query, **filters)
 
     def get(self, run_id):
         if not re.fullmatch(r'[a-f0-9]{16}', run_id):
@@ -245,7 +275,7 @@ class EvaluationManager:
             row = db.execute('SELECT data FROM evaluations WHERE id=?', (run_id,)).fetchone()
         if not row:
             raise HTTPException(404, 'Benchmark run not found.')
-        return json.loads(row[0])
+        return with_performance(json.loads(row[0]), 'coding')
 
     def artifact(self, index, name, value):
         path = self.root / self.current['id'] / f'task-{index + 1:02d}' / name
@@ -271,7 +301,7 @@ class EvaluationManager:
             temporary.unlink(missing_ok=True)
         return archive
 
-    async def command(self, *args, input=None, timeout=60, check=True):
+    async def command(self, *args, input=None, timeout=60, check=True, live=False):
         """Bound output and kill our own CLI process on cancellation.
 
         sg activates an already-granted Docker group in an older login session.
@@ -286,10 +316,14 @@ class EvaluationManager:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         output = bytearray()
         truncated = False
+        import codecs
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         async def read():
             nonlocal truncated
             while block := await proc.stdout.read(65536):
                 output.extend(block)
+                if live:
+                    self.output.append('output', decoder.decode(block))
                 if len(output) > 4_000_000:
                     del output[:-4_000_000]
                     truncated = True
@@ -370,13 +404,13 @@ class EvaluationManager:
             raise ValueError('Unknown benchmark suite.')
         path = self.assets / (suite + '.json')
         if not path.is_file():
-            raise ValueError('Prepare this benchmark before starting a timed run.')
+            raise ValueError('Prepare this benchmark before starting a run.')
         result = json.loads(path.read_text())
         fingerprint = result.pop('fingerprint')
         if digest(result) != fingerprint:
             raise ValueError('Benchmark assets changed. Prepare them again before running.')
-        if suite == 'swebench' and result.get('selection') != SUITES[suite]['selection']:
-            raise ValueError('This cached repository subset is outdated. Prepare the offline subset before running.')
+        if result.get('selection') != SUITES[suite].get('selection'):
+            raise ValueError('This cached benchmark subset is outdated. Prepare the benchmark again before running.')
         result['fingerprint'] = fingerprint
         return result
 
@@ -406,6 +440,7 @@ class EvaluationManager:
             return None
         return dict(id=self.current['id'], state=self.current['state'], suite=self.current['suite'],
                     name=self.current['benchmark'], created=self.current['created'], deadline=self.current['deadline'],
+                    preset=self.current.get('preset'), preset_label=self.current.get('preset_label'),
                     summary=self.current['summary'], tasks=self.current['tasks'], model=self.current['model'])
 
     def assert_idle(self):
@@ -463,7 +498,7 @@ class EvaluationManager:
                     del task['reference_patch']  # Never expose a reference patch during inference.
             manifest['fingerprint'] = digest(manifest)
             atomic_json(self.assets / (suite + '.json'), manifest)
-            self.setup.update(state='complete', message='Ready. Task environments are cached; timed runs do not download anything.')
+            self.setup.update(state='complete', message='Ready. Task environments are cached; benchmark runs do not download anything.')
         except asyncio.CancelledError:
             self.setup.update(state='cancelled', message='Preparation stopped. Completed Docker layers can be reused.')
         except Exception as exc:
@@ -499,7 +534,9 @@ class EvaluationManager:
         manifest = self.manifest(suite)
         if suite == 'swebench':
             manifest = select_repository_tasks(manifest, budget_seconds)
-        # Fast, offline preflight. A missing image never triggers a timed download.
+        else:
+            manifest = select_human_tasks(manifest, budget_seconds)
+        # Fast, offline preflight. A missing image never triggers a download during a run.
         for image in {manifest['worker_image'], *(t['image_id'] for t in manifest['tasks'] if 'image_id' in t)}:
             await self.command('docker', 'image', 'inspect', image, timeout=5)
         self.assert_idle()  # Another request could have started during preflight.
@@ -522,7 +559,9 @@ class EvaluationManager:
         matched = [dict(id=p.get('id'), name=p['name']) for p in profiles if p.get('settings') == settings]
         now, run_id = time.time(), secrets.token_hex(8)
         config = SUITES[suite]
-        protocol = dict(version=PROTOCOL, **config, human_prompt=HUMAN_PROMPT, agent_prompt=AGENT_PROMPT,
+        preset = preset_for(budget_seconds)
+        protocol = dict(version=PROTOCOL, **config, preset=preset['id'], preset_label=preset['label'],
+                        human_prompt=HUMAN_PROMPT, agent_prompt=AGENT_PROMPT,
                         command_seconds=45, max_steps=40, output=settings['max_output'], temperature=settings['temperature'],
                         reasoning=settings['reasoning_effort'], budget_seconds=budget_seconds,
                         implementation=digest({name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
@@ -531,12 +570,19 @@ class EvaluationManager:
                         attempts_per_task=1, sampling_note='No seed, top_p, top_k, or min_p override; installed engine defaults apply.')
         protocol.update(count=len(manifest['tasks']), task_ids=[t['id'] for t in manifest['tasks']])
         if suite == 'swebench':
-            protocol.update(task_selection='Fixed prefix: 10 minutes = Pylint; 20 = Pylint + Flask; 30 = all three.',
-                            grading_reserve_seconds=config['grader_seconds'], patch_reserve_seconds=30,
-                            run_cleanup_seconds=20, task_cleanup_seconds=10,
-                            agent_feedback='Remaining seconds, remaining actions, and saved-patch status after each command.')
+            protocol.update(task_selection='Fixed prefix: Short = Pylint; Medium = Pylint + Flask; Long = all three.',
+                            timing_policy='No generation, per-task, or whole-run wall-clock cutoff. '
+                                          'Shell commands and the isolated grader retain safety ceilings.',
+                            command_safety_seconds=45, grader_safety_seconds=config['grader_seconds'],
+                            agent_feedback='Remaining actions and saved-patch status after each command.')
+        else:
+            protocol.update(task_selection='Fixed deterministic prefixes: Short = 20, Medium = 40, Long = 80 HumanEval+ problems.',
+                            timing_policy='No generation, per-task, or whole-run wall-clock cutoff. '
+                                          'Only the isolated grader has a safety ceiling.',
+                            grader_safety_seconds=config['grader_seconds'])
         self.current = dict(schema_version=1, id=run_id, suite=suite, benchmark=config['benchmark'], state='running',
-            created=now, deadline=now + budget_seconds, budget_seconds=budget_seconds, elapsed_seconds=0,
+            created=now, deadline=None,
+            budget_seconds=budget_seconds, preset=preset['id'], preset_label=preset['label'], elapsed_seconds=0,
             model=model, model_fingerprint=digest(identity), model_identity=identity,
             settings=settings, profiles=matched, engine=self.supervisor.engine,
             effective=clean(copy.deepcopy(self.supervisor.effective)), hardware=clean(copy.deepcopy(self.telemetry.value)),
@@ -545,6 +591,8 @@ class EvaluationManager:
             runner=config['runner'], protocol_hash=digest(protocol), evaluation=protocol,
             dataset={k: v for k, v in manifest.items() if k != 'tasks'},
             tasks=[dict(id=t['id'], state='unattempted', detail='', metrics=[]) for t in manifest['tasks']])
+        self.output.start(run_id, 'coding', config['benchmark'], model)
+        self.output_states = {}
         self.save()
         self.task = asyncio.create_task(self.run(manifest))
         return self.current
@@ -552,14 +600,18 @@ class EvaluationManager:
     async def generate(self, messages, task, index, filename='answer.json'):
         settings = self.current['settings']
         content, reasoning, complete = '', '', False
+        self.output.append('status', f"\n{task['id']} · Model response ({filename})\n")
         try:
             async for event in self.supervisor.stream(messages, settings['max_output'], settings['temperature'],
                                                   reasoning_effort=settings['reasoning_effort']):
                 if event['type'] == 'token':
                     content += event['text']
                     reasoning += event.get('reasoning', '')
+                    self.output.append('reasoning', event.get('reasoning', ''))
+                    self.output.append('model', event['text'])
                 elif event['type'] == 'complete':
                     task['metrics'].append(event)
+                    self.output.append('status', f"\nGeneration: {event.get('tokens_per_second')} tok/s · Prefill: {event.get('prompt_tokens_per_second')} tok/s\n")
                     complete = True
                 elif event['type'] in ('cancelled', 'error'):
                     raise RuntimeError(event.get('message', 'Inference cancelled.'))
@@ -594,7 +646,7 @@ class EvaluationManager:
                     code, output = await self.command('docker', 'exec', '-i', name, 'git', '-C', '/testbed', 'apply', '--whitespace=nowarn', '-', input=patch, check=False)
                     if code:
                         return dict(passed=False, patch_error='Generated patch could not be applied to a fresh checkout.'), output
-                _, output = await self.command('docker', 'exec', '-i', name, 'bash', '-s', input=task['eval_script'], timeout=timeout, check=False)
+                _, output = await self.command('docker', 'exec', '-i', name, 'bash', '-s', input=task['eval_script'], timeout=timeout, check=False, live=True)
                 result = await self.worker('grade-swe', dict(spec=task['spec'], log=output, patch=patch), image=image, timeout=30)
                 return result, output
         finally:
@@ -602,17 +654,17 @@ class EvaluationManager:
                 await self.remove(name)
 
     async def human(self, index, source, task, manifest):
-        task.update(state='generating', detail='Writing one answer; reasoning counts toward the time limit.')
+        task.update(state='generating', detail='Writing one answer; reasoning may finish naturally.')
         self.save()
         messages = [dict(role='system', content=HUMAN_PROMPT), dict(role='user', content=source['prompt'])]
         self.artifact(index, 'prompt.json', messages)
-        async with asyncio.timeout(SUITES['humaneval']['generation_seconds']):
-            answer = await self.generate(messages, task, index)
+        answer = await self.generate(messages, task, index)
         solution = extract_python(answer['content'])
         self.artifact(index, 'solution.py', solution)
         task.update(state='grading', detail='Running the original and extended EvalPlus tests.')
         self.save()
-        grade = await self.worker('grade-human', dict(task_id=source['id'], solution=solution), image=manifest['worker_image'], timeout=25)
+        grade = await self.worker('grade-human', dict(task_id=source['id'], solution=solution),
+                                  image=manifest['worker_image'], timeout=SUITES['humaneval']['grader_seconds'])
         self.artifact(index, 'grading.json', grade)
         task['grade'] = grade
         task.update(state='timed_out' if 'timeout' in (grade['base_status'], grade['plus_status']) else 'passed' if grade['passed'] else 'failed',
@@ -631,67 +683,53 @@ class EvaluationManager:
 
     async def repository(self, index, source, task, manifest, deadline=None):
         config = SUITES['swebench']
-        deadline = deadline if deadline is not None else time.monotonic() + config['task_seconds'] - 10
-        # This deadline includes the remaining TOTAL run budget, not just the
-        # per-task cap. Reserve checkout/grading and patch capture before inference.
-        agent_deadline = min(time.monotonic() + config['generation_seconds'], deadline - config['grader_seconds'] - 30)
-        task.update(state='starting', detail='Opening an isolated repository checkout.',
-                    time_budget_seconds=round(max(0, deadline - time.monotonic()), 2),
-                    generation_budget_seconds=round(max(0, agent_deadline - time.monotonic()), 2))
+        task.update(state='starting', detail='Opening an isolated repository checkout.')
         self.save()
         name = await self.new_repository(source)
         def feedback(remaining):
-            seconds = max(0, int(agent_deadline - time.monotonic()))
             patch_status = 'A patch is saved.' if task.get('patch_present') else 'No patch has been produced yet.'
-            return f'Agent budget: {seconds} seconds and {remaining} actions remaining. {patch_status} Implement and test a focused fix before the limit; grading follows automatically.'
+            return f'Agent budget: {remaining} actions remaining. {patch_status} Implement and test a focused fix; grading follows automatically.'
         messages = [dict(role='system', content=AGENT_PROMPT), dict(role='user', content=source['prompt'] + '\n\n' + feedback(40))]
         transcript = []
         self.artifact(index, 'prompt.json', messages)
         try:
             task.update(state='generating', detail='Inspecting, editing, and testing the repository.')
             self.save()
-            try:
-                async with asyncio.timeout(max(0.001, agent_deadline - time.monotonic())):
-                    for step in range(40):
-                        answer = await self.generate(messages, task, index, f'answer-{step + 1:02d}.json')
-                        messages.append(answer)
-                        transcript.append(dict(step=step + 1, answer=answer))
-                        self.artifact(index, 'trajectory.json', transcript)
-                        task['steps'] = step + 1
-                        try:
-                            action = parse_action(answer['content'])
-                        except (ValueError, TypeError) as exc:
-                            transcript[-1]['action_error'] = str(exc)
-                            self.artifact(index, 'trajectory.json', transcript)
-                            messages.append(dict(role='user', content=f'Invalid action: {exc}. Return one JSON action.\n\n' + feedback(39 - step)))
-                            continue
-                        if action.get('finish'):
-                            break
-                        code, output = await self.command('docker', 'exec', name, 'timeout', '--kill-after=2s', '40s',
-                            'bash', '-lc', 'cd /testbed\n' + action['command'], timeout=45, check=False)
-                        output = f'Exit code: {code}\n' + output
-                        transcript[-1]['command_output'] = output
-                        await self.checkpoint_patch(name, index, source, task)
-                        transcript[-1]['budget_feedback'] = feedback(39 - step)
-                        self.artifact(index, 'trajectory.json', transcript)
-                        messages.append(dict(role='user', content=output[-12000:] + '\n\n' + transcript[-1]['budget_feedback']))
-                        self.save()
-                    else:
-                        task['agent_limit'] = '40-turn limit reached; grading the current patch.'
-            except TimeoutError:
-                # Stop every process, then reopen only the idle container entrypoint.
-                # Its filesystem is preserved, so the grading reserve can test the
-                # latest patch without racing an unfinished model command.
-                task['agent_limit'] = 'Agent time limit reached; grading the current patch.'
-                await self.command('docker', 'kill', name, timeout=5, check=False)
-                await self.command('docker', 'start', name, timeout=10)
+            for step in range(40):
+                answer = await self.generate(messages, task, index, f'answer-{step + 1:02d}.json')
+                messages.append(answer)
+                transcript.append(dict(step=step + 1, answer=answer))
+                self.artifact(index, 'trajectory.json', transcript)
+                task['steps'] = step + 1
+                try:
+                    action = parse_action(answer['content'])
+                except (ValueError, TypeError) as exc:
+                    transcript[-1]['action_error'] = str(exc)
+                    self.artifact(index, 'trajectory.json', transcript)
+                    messages.append(dict(role='user', content=f'Invalid action: {exc}. Return one JSON action.\n\n' + feedback(39 - step)))
+                    continue
+                if action.get('finish'):
+                    break
+                self.output.append('command', '$ ' + action['command'] + '\n')
+                code, output = await self.command('docker', 'exec', name, 'timeout', '--kill-after=2s', '40s',
+                    'bash', '-lc', 'cd /testbed\n' + action['command'], timeout=45, check=False, live=True)
+                output = f'Exit code: {code}\n' + output
+                self.output.append('status', f'\nCommand exited {code}\n')
+                transcript[-1]['command_output'] = output
+                await self.checkpoint_patch(name, index, source, task)
+                transcript[-1]['budget_feedback'] = feedback(39 - step)
+                self.artifact(index, 'trajectory.json', transcript)
+                messages.append(dict(role='user', content=output[-12000:] + '\n\n' + transcript[-1]['budget_feedback']))
+                self.save()
+            else:
+                task['agent_limit'] = '40-turn limit reached; grading the current patch.'
             patch = await self.checkpoint_patch(name, index, source, task)
         finally:
             await self.remove(name)
         task.update(state='grading', detail='Applying the patch and running official tests in a fresh container.')
         self.save()
         grade, output = await self.grade_repository(source, patch, manifest['worker_image'],
-                                                    timeout=max(0.001, min(config['grader_seconds'], deadline - time.monotonic() - 5)))
+                                                    timeout=config['grader_seconds'])
         self.artifact(index, 'test-output.txt', output)
         self.artifact(index, 'grading.json', grade)
         task['grade'] = grade
@@ -705,32 +743,25 @@ class EvaluationManager:
 
     async def run(self, manifest):
         start = time.monotonic()
-        run_deadline = start + self.current['budget_seconds'] - 20
         try:
-            # Reserve time for container termination and final archive writes.
-            async with asyncio.timeout(max(0.01, self.current['budget_seconds'] - 20)):
-                for index, (source, task) in enumerate(zip(manifest['tasks'], self.current['tasks'])):
-                    task_start = time.monotonic()
-                    try:
-                        deadline = min(run_deadline, task_start + SUITES[self.current['suite']]['task_seconds'] - 10)
-                        async with asyncio.timeout(max(0.001, deadline - time.monotonic())):
-                            if self.current['suite'] == 'humaneval':
-                                await self.human(index, source, task, manifest)
-                            else:
-                                await self.repository(index, source, task, manifest, deadline=deadline)
-                    except TimeoutError:
-                        task.update(state='timed_out', detail='Task time limit reached; this is not a verified test failure.')
-                    except Exception as exc:
-                        task.update(state='error', detail=str(exc))
-                    finally:
-                        task['elapsed_seconds'] = round(time.monotonic() - task_start, 2)
-                        self.current['elapsed_seconds'] = round(time.monotonic() - start, 2)
-                        self.save()
-                self.current['state'] = 'complete'
-        except TimeoutError:
-            self.current.update(state='timed_out', error='The total time budget was reached. Remaining tasks were not attempted.')
+            for index, (source, task) in enumerate(zip(manifest['tasks'], self.current['tasks'])):
+                task_start = time.monotonic()
+                try:
+                    if self.current['suite'] == 'humaneval':
+                        await self.human(index, source, task, manifest)
+                    else:
+                        await self.repository(index, source, task, manifest)
+                except TimeoutError:
+                    task.update(state='timed_out', detail='A hard safety timeout was reached; this is not a verified test failure.')
+                except Exception as exc:
+                    task.update(state='error', detail=str(exc))
+                finally:
+                    task['elapsed_seconds'] = round(time.monotonic() - task_start, 2)
+                    self.current['elapsed_seconds'] = round(time.monotonic() - start, 2)
+                    self.save()
+            self.current['state'] = 'complete'
         except asyncio.CancelledError:
-            self.current.update(state='cancelled', error='Stopped by the user. Completed results are archived.')
+            self.current.update(state='cancelled', error='Stopped by the user. This aborted run was discarded.')
         except Exception as exc:
             self.current.update(state='error', error=str(exc))
         finally:

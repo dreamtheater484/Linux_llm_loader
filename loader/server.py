@@ -5,8 +5,10 @@ from contextlib import asynccontextmanager, suppress
 import fcntl
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import getpass
@@ -27,9 +29,13 @@ import psutil
 from .engines import PROJECT, RUNTIME, Settings, engine_inventory, launch, validate
 from .library import scan
 from .metrics import Telemetry, number
+from .llama_cpp import count_prompt as llama_count_prompt, effective_settings as llama_effective_settings, normalize_usage as llama_usage
 from .reasoning import ReasoningEffort, reasoning_kwargs
 from .tool_calls import ToolRequest, ToolCallAccumulator, ToolResponseError, validate_tool_history
 from .benchmarks import EvaluationManager, report_markdown
+from .profiles import enrich_profile, record_loaded_memory
+from .live_output import LiveOutput
+from .archive import ABORTED, list_runs, manage_runs, run_performance
 
 MODEL_ROOT = Path(os.environ.get('LUMEN_MODEL_ROOT', Path.home() / 'models')).expanduser()
 STATE = Path(os.environ.get('LUMEN_STATE', RUNTIME / 'state'))
@@ -96,6 +102,9 @@ class Supervisor:
         self.benchmark = None
         self.last_usage = None
         self.tool_format = None
+        self.live_output = LiveOutput()
+        self.ready_at = None
+        self.memory_recorded_for = None
 
     async def refresh(self):
         self.inventory = await asyncio.to_thread(scan, MODEL_ROOT)
@@ -111,7 +120,7 @@ class Supervisor:
                     effective=self.effective, engine=self.engine, started=self.started,
                     elapsed_seconds=round(time.time() - self.started, 1) if self.started else 0,
                     latest_log=self.logs[-1] if self.logs else None, last_usage=self.last_usage,
-                    busy=self.generation_lock.locked() or evaluations.active, benchmark=self.benchmark, evaluation=evaluations.snapshot(),
+                    live_output=self.live_output.meta, busy=self.generation_lock.locked() or evaluations.active, benchmark=self.benchmark, evaluation=evaluations.snapshot(),
                     tool_calling={'enabled': bool(self.tool_format), 'format': self.tool_format,
                                   'choices': ['auto', 'none'] if self.tool_format else ['none']})
 
@@ -206,7 +215,7 @@ class Supervisor:
                 requested=requested, environment={key: env.get(key) for key in (
                     'OMP_NUM_THREADS', 'EXL3_MOE_PINNED_ARENA', 'EXL3_HOST_MEM_RESERVE_MB', 'CC',
                     'CUDA_VISIBLE_DEVICES', 'TOKENIZERS_PARALLELISM')})
-            self.tool_format = requested.get('model', {}).get('tool_format') if self.engine == 'exl3' else None
+            self.tool_format = requested.get('model', {}).get('tool_format') if self.engine == 'exl3' else requested.get('tool_format')
             save_json(run_dir / 'profile.json', self.settings.model_dump())
             self.proc = await asyncio.create_subprocess_exec(*args, cwd=run_dir, env=env, start_new_session=True,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=2**20)
@@ -233,9 +242,12 @@ class Supervisor:
                                 if self.settings.prediction == 'mtp' and not effective.get('draft'):
                                     raise ValueError('MTP was requested but the engine did not load a prediction component.')
                                 self.effective = {k: v for k, v in effective.items() if k != 'prompt_template_content'}
+                            elif self.engine == 'gguf':
+                                self.effective = await llama_effective_settings(client, self.url, self.headers, self.settings, requested)
                             else:
                                 self.effective = requested
                             self.state = 'ready'
+                            self.ready_at = time.time()
                             save_json(STATE / 'last-profile.json', self.settings.model_dump())
                             return
                     except (httpx.HTTPError, OSError):
@@ -256,6 +268,16 @@ class Supervisor:
                 self.error = f'Engine stopped unexpectedly (exit {self.proc.returncode}).'
                 await self._terminate()
                 self.state = 'error'
+            if (self.state == 'ready' and self.settings and self.ready_at
+                    and self.memory_recorded_for != self.started
+                    and not self.generation_lock.locked() and not evaluations.active
+                    and not (self.benchmark_task and not self.benchmark_task.done())
+                    and (telemetry.value.get('timestamp') or 0) >= self.ready_at + 3):
+                try:
+                    if record_loaded_memory(STATE, self.settings.model_dump(), self.model, telemetry.value):
+                        self.memory_recorded_for = self.started
+                except (OSError, sqlite3.Error) as exc:
+                    self.logs.append('LUMEN: Could not save loaded memory measurement: ' + str(exc))
             await asyncio.sleep(1)
 
     def check_request(self, messages, max_output=None, reasoning_effort=None, tool_request=None):
@@ -302,6 +324,7 @@ class Supervisor:
                 count_kwargs['tools'] = tool_payload['tools']
             calls = ToolCallAccumulator()
             started, first, last, usage = time.monotonic(), None, None, None
+            timings = {}
             wall_started, finish_reason = time.time(), 'stop'
             async with httpx.AsyncClient(timeout=httpx.Timeout(1800, connect=10), trust_env=False) as client:
                 if self.engine == 'exl3':
@@ -314,6 +337,13 @@ class Supervisor:
                     if count + output_limit + 128 > self.settings.context:
                         raise ValueError(f'Conversation uses {count:,} tokens before the reply prefix. Reduce it or reserve a smaller answer; history is not truncated.')
                     yield {'type': 'context', 'input_tokens': count, 'prefix_reserve': 128}
+                elif self.engine == 'gguf':
+                    count = await llama_count_prompt(client, self.url, self.headers, messages, template_kwargs, tool_payload)
+                    if count is not None:
+                        reserve = 16
+                        if count + output_limit + reserve > self.settings.context:
+                            raise ValueError(f'Conversation uses {count:,} tokens including the reply prefix. Reduce it or reserve a smaller answer; history is not truncated.')
+                        yield {'type': 'context', 'input_tokens': count, 'prefix_reserve': reserve}
                 async with client.stream('POST', self.url + '/v1/chat/completions', headers=self.headers, json=payload) as response:
                     if response.status_code != 200:
                         detail = (await response.aread()).decode(errors='replace')
@@ -343,6 +373,8 @@ class Supervisor:
                                 raw.append(event)
                             if event.get('usage'):
                                 usage = event['usage']
+                            if self.engine == 'gguf' and event.get('timings'):
+                                timings.update(event['timings'])
                             for choice in event.get('choices', []):
                                 if choice.get('index', 0) != 0:
                                     raise ValueError('This server supports one completion choice per request.')
@@ -364,6 +396,8 @@ class Supervisor:
                                 await pending
             if not usage:
                 raise ValueError('The engine closed the response without token usage; this run has no verified speed measurement.')
+            if self.engine == 'gguf':
+                usage = llama_usage(usage, timings)
             validated_calls = calls.finish(tool_payload, finish_reason)
             if validated_calls:
                 now = time.monotonic()
@@ -503,6 +537,11 @@ async def cancel():
     supervisor.cancel.set()
     if supervisor.benchmark_task and not supervisor.benchmark_task.done():
         supervisor.benchmark_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await supervisor.benchmark_task
+        if supervisor.benchmark and supervisor.benchmark.get('state') == 'running':
+            supervisor.benchmark['state'] = 'cancelled'
+            supervisor.live_output.finish(supervisor.benchmark)
     return {'status': 'cancelling'}
 
 
@@ -531,8 +570,8 @@ class ChatRequest(ToolRequest):
 
 @app.post('/api/token-count')
 async def token_count(body: ChatRequest):
-    if supervisor.state != 'ready' or supervisor.engine != 'exl3':
-        raise ValueError('Exact counting is available after loading an ExLlamaV3 model.')
+    if supervisor.state != 'ready' or supervisor.engine not in ('exl3', 'gguf'):
+        raise ValueError('Exact counting is available after loading an ExLlamaV3 or llama.cpp model.')
     effort = body.reasoning_effort if body.reasoning_effort is not None else supervisor.settings.reasoning_effort
     tool_payload = body.tool_payload(supervisor.engine, supervisor.tool_format)
     validate_tool_history(body.messages)
@@ -540,6 +579,11 @@ async def token_count(body: ChatRequest):
     if tool_payload.get('tools'):
         template_kwargs['tools'] = tool_payload['tools']
     async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
+        if supervisor.engine == 'gguf':
+            count = await llama_count_prompt(client, supervisor.url, supervisor.headers, body.messages, template_kwargs, tool_payload)
+            if count is None:
+                raise ValueError('llama.cpp reports image token usage after generation; advance counting supports text conversations only.')
+            return {'input_tokens': count, 'prefix_reserve': 16, 'capacity': supervisor.settings.context}
         response = await client.post(supervisor.url + '/v1/token/encode', headers=supervisor.headers,
             json={'text': body.messages, 'chat_template_kwargs': template_kwargs})
         if response.is_error:
@@ -624,8 +668,9 @@ async def openai_chat(request: Request):
 
 
 class ProfileRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=180)
     settings: Settings
+    auto_name: bool = False
 
     @field_validator('name')
     @classmethod
@@ -668,7 +713,82 @@ def find_profile(saved, profile_id):
 
 @app.get('/api/profiles')
 async def profiles(trash: bool = False):
-    return [p for p in read_profiles() if bool(p.get('deleted_at')) == trash]
+    saved = [p for p in read_profiles() if bool(p.get('deleted_at')) == trash]
+    results = []
+    with db() as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ('benchmarks', 'evaluations'):
+            if table not in tables:
+                continue
+            # Read summary fields only, leaving generated answers and trajectories on disk.
+            fields = ('id', 'created', 'settings', 'state', 'median_tps', 'median_prompt_tps', 'benchmark', 'summary', 'performance')
+            select = ', '.join(f"json_extract(data, '$.{field}')" for field in fields)
+            for row in connection.execute(f"SELECT {select} FROM {table} WHERE json_extract(data, '$.deleted_at') IS NULL AND json_extract(data, '$.state') NOT IN ('running', 'cancelled', 'interrupted', 'aborted') ORDER BY created DESC"):
+                result = dict(zip(fields, row))
+                result['kind'] = 'speed' if table == 'benchmarks' else 'coding'
+                for field in ('settings', 'summary', 'performance'):
+                    result[field] = json.loads(result[field]) if result[field] else {}
+                if table == 'evaluations':
+                    performance = result['performance']
+                    if not performance:
+                        # Older runs already contain timings. Read only their numeric metrics,
+                        # rather than generated answers, grading output, or trajectories.
+                        metrics = connection.execute("""SELECT json_group_array(json_object(
+                            'tokens_per_second', json_extract(m.value, '$.tokens_per_second'),
+                            'prompt_tokens_per_second', json_extract(m.value, '$.prompt_tokens_per_second'),
+                            'speed_source', json_extract(m.value, '$.speed_source')))
+                            FROM evaluations e, json_each(e.data, '$.tasks') t, json_each(t.value, '$.metrics') m
+                            WHERE e.id=?""", (result['id'],)).fetchone()[0]
+                        performance = run_performance({'tasks': [{'metrics': json.loads(metrics)}]})
+                    result['median_tps'] = performance.get('decode_tps')
+                    result['median_prompt_tps'] = performance.get('prefill_tps')
+                elif result['median_prompt_tps'] is None:
+                    # Early speed tests stored engine prefill timings under usage only.
+                    values = connection.execute("""SELECT COALESCE(
+                        json_extract(r.value, '$.prompt_tokens_per_second'),
+                        json_extract(r.value, '$.usage.prompt_tokens_per_sec'))
+                        FROM benchmarks b, json_each(b.data, '$.runs') r WHERE b.id=?""", (result['id'],)).fetchall()
+                    measured = [v[0] for v in values if type(v[0]) in (int, float) and math.isfinite(v[0]) and v[0] > 0]
+                    result['median_prompt_tps'] = statistics.median(measured) if measured else None
+                results.append(result)
+        loads = {key: json.loads(data) for key, data in connection.execute('SELECT key, data FROM profile_loads')} if 'profile_loads' in tables else {}
+    results.sort(key=lambda item: item.get('created') or 0, reverse=True)
+    models = {m['id']: m for m in supervisor.inventory['models']}
+    return [enrich_profile(profile, models.get(profile['settings']['model_id']), results, loads) for profile in saved]
+
+
+class ProfileOrder(BaseModel):
+    ids: list[str]
+
+
+@app.post('/api/profiles/reorder')
+async def reorder_profiles(body: ProfileOrder):
+    saved = read_profiles()
+    active = {p['id']: p for p in saved if not p.get('deleted_at')}
+    if len(body.ids) != len(active) or set(body.ids) != set(active):
+        raise HTTPException(409, 'The profile list changed. Refresh it before reordering.')
+    save_json(STATE / 'profiles.json', [active[identity] for identity in body.ids] + [p for p in saved if p.get('deleted_at')])
+    return await profiles()
+
+
+@app.post('/api/profiles/{profile_id}/duplicate')
+async def duplicate_profile(profile_id: str):
+    saved = read_profiles()
+    original = find_profile(saved, profile_id)
+    if original.get('deleted_at'):
+        raise HTTPException(409, 'Restore this profile before duplicating it.')
+    names = {p['name'].casefold() for p in saved if not p.get('deleted_at')}
+    base = re.sub(r' · copy \d+$', '', original['name'])[:155]
+    used_numbers = {p.get('copy_number') for p in saved if not p.get('deleted_at')
+                    and p['settings']['model_id'] == original['settings']['model_id']}
+    index = 1
+    while f'{base} · copy {index}'.casefold() in names or index in used_numbers:
+        index += 1
+    duplicate = {**original, 'id': secrets.token_hex(8), 'name': f'{base} · copy {index}',
+                 'copy_number': index, 'updated_at': time.time()}
+    saved.insert(saved.index(original) + 1, duplicate)
+    save_json(STATE / 'profiles.json', saved)
+    return await profiles()
 
 
 @app.post('/api/profiles')
@@ -718,8 +838,7 @@ async def restore_profile(profile_id: str):
 
 @app.get('/api/benchmarks')
 async def benchmarks():
-    with db() as connection:
-        return [json.loads(row[0]) for row in connection.execute('SELECT data FROM benchmarks ORDER BY created DESC LIMIT 100')]
+    return list_runs(STATE, 'speed', limit=100)['items']
 
 
 class EvaluationRequest(BaseModel):
@@ -739,8 +858,39 @@ async def evaluation_status():
 
 @app.get('/api/evaluations')
 async def evaluation_list(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0),
-                          suite: Literal['humaneval', 'swebench'] | None = None, q: str = Query('', max_length=200)):
-    return evaluations.list(limit, offset, suite, q)
+                          suite: Literal['humaneval', 'swebench'] | None = None, q: str = Query('', max_length=200),
+                          model_id: str | None = None, sort: Literal['newest', 'oldest', 'score'] = 'newest',
+                          status: Literal['complete', 'timed_out', 'error', 'failed'] | None = None, trash: bool = False):
+    return evaluations.list(limit, offset, suite, q, model_id=model_id, sort=sort, status=status, trash=trash)
+
+
+@app.get('/api/archive/speed')
+async def speed_archive(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0),
+                        q: str = Query('', max_length=200), model_id: str | None = None,
+                        sort: Literal['newest', 'oldest', 'score'] = 'newest',
+                        status: Literal['complete', 'timed_out', 'error', 'failed'] | None = None, trash: bool = False):
+    return list_runs(STATE, 'speed', limit, offset, query=q, model_id=model_id, sort=sort, status=status, trash=trash)
+
+
+@app.get('/api/archive/models')
+async def archive_models(q: str = Query('', max_length=200)):
+    query = re.sub(r'[-_\s]+', ' ', q.lower()).strip()
+    return [{'id': m['id'], 'name': m['name'], 'quant': m['quant'], 'format': m['format']}
+            for m in supervisor.inventory['models']
+            if all(term in re.sub(r'[-_\s]+', ' ', f"{m['name']} {m['quant']} {m['format']}".lower())
+                   for term in query.split())][:50]
+
+
+class ArchiveAction(BaseModel):
+    kind: Literal['coding', 'speed']
+    ids: list[str] = Field(min_length=1, max_length=100)
+    action: Literal['delete', 'restore']
+
+
+@app.post('/api/archive/manage')
+async def manage_archive(body: ArchiveAction):
+    state = evaluations.state if body.kind == 'coding' else STATE
+    return manage_runs(state, body.kind, body.ids, body.action)
 
 
 @app.get('/api/evaluations/install-instructions')
@@ -801,6 +951,11 @@ class BenchmarkRequest(BaseModel):
     reasoning_effort: ReasoningEffort | None = None
 
 
+@app.get('/api/benchmark-output')
+async def benchmark_output(after: int = Query(0, ge=0), run_id: str = ''):
+    return supervisor.live_output.read(after, run_id)
+
+
 @app.post('/api/benchmark', status_code=202)
 async def benchmark(body: BenchmarkRequest | None = None):
     if evaluations.active or evaluations.preparing:
@@ -809,31 +964,38 @@ async def benchmark(body: BenchmarkRequest | None = None):
         raise ValueError('Load a model and finish the current request before benchmarking.')
     effort = body.reasoning_effort if body and body.reasoning_effort is not None else supervisor.settings.reasoning_effort
     reasoning_kwargs(supervisor.model, effort)
-    supervisor.benchmark = {'state': 'running', 'completed': 0, 'total': 3}
+    run_id = secrets.token_hex(8)
+    supervisor.live_output.start(run_id, 'speed', 'Speed test', supervisor.model)
+    supervisor.benchmark = {'id': run_id, 'state': 'running', 'completed': 0, 'total': 3}
     supervisor.benchmark_task = asyncio.create_task(run_benchmark(effort))
     return supervisor.benchmark
 
 
 async def run_benchmark(effort):
-    result = dict(id=secrets.token_hex(8), created=time.time(), model=supervisor.model,
+    result = dict(id=supervisor.benchmark.get('id') or secrets.token_hex(8), created=time.time(), model=supervisor.model,
                   settings={**supervisor.settings.model_dump(), 'reasoning_effort': effort},
                   engine=supervisor.engine, effective=supervisor.effective, runs=[], kind='short-prompt',
-                  notes='Three unique prompts, configured capacity preserved. Read cached-token counts; capacity is not a filled-context test.')
+                  notes='Three unique prompts with 512-token output limits and the profile temperature. Configured capacity preserved. Read cached-token counts; capacity is not a filled-context test.')
     prompts = [
         'Write a practical guide to designing a Python file indexer. Discuss traversal, incremental updates, error handling, concurrency, and a concrete implementation. Be detailed.',
         'Explain how a modern city could design reliable public transport. Cover timetables, transfers, accessibility, financing, and how success would be measured. Be detailed.',
         'Write a Python implementation of an LRU cache, followed by a detailed explanation of its invariants, complexity, and meaningful test cases. Continue until the design is fully explained.']
     try:
         for i, prompt in enumerate(prompts):
+            supervisor.live_output.append('status', f'\nPrompt {i + 1}/3\n')
+            supervisor.live_output.append('prompt', prompt + '\n')
             messages = [{'role': 'user', 'content': f'{secrets.token_hex(16)} is a unique test identifier; ignore it.\n' + prompt}]
             text, metrics = '', None
-            async for event in supervisor.stream(messages, 512, 0.7, reasoning_effort=effort):
+            async for event in supervisor.stream(messages, 512, supervisor.settings.temperature, reasoning_effort=effort):
                 if event['type'] == 'token':
                     text += event['text']
+                    supervisor.live_output.append('reasoning', event.get('reasoning', ''))
+                    supervisor.live_output.append('model', event['text'])
                 if event['type'] == 'complete':
                     metrics = event
             if metrics is None:
                 raise ValueError('Benchmark cancelled or incomplete.')
+            supervisor.live_output.append('status', f"\nGeneration: {metrics.get('tokens_per_second')} tok/s · Prefill: {metrics.get('prompt_tokens_per_second')} tok/s\n")
             result['runs'].append(dict(metrics, output_preview=text[:600]))
             supervisor.benchmark['completed'] = i + 1
         speeds = [r['tokens_per_second'] for r in result['runs'] if r['tokens_per_second'] is not None]
@@ -845,9 +1007,11 @@ async def run_benchmark(effort):
         result['state'] = 'cancelled'
     except Exception as exc:
         result.update(state='cancelled' if supervisor.cancel.is_set() else 'failed', error=str(exc))
-    with db() as connection:
-        connection.execute('INSERT INTO benchmarks VALUES (?, ?, ?)', (result['id'], result['created'], json.dumps(result)))
-    supervisor.benchmark = {'state': result['state'], 'completed': len(result['runs']), 'total': 3, 'error': result.get('error')}
+    if result['state'] not in ABORTED:
+        with db() as connection:
+            connection.execute('INSERT INTO benchmarks VALUES (?, ?, ?)', (result['id'], result['created'], json.dumps(result)))
+    supervisor.live_output.finish(result)
+    supervisor.benchmark = {'id': result['id'], 'state': result['state'], 'completed': len(result['runs']), 'total': 3, 'error': result.get('error')}
 
 
 DIST = PROJECT / 'frontend/dist'

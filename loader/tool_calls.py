@@ -61,7 +61,7 @@ class ToolRequest(BaseModel):
         # native parser is enabled globally (ordinary chat may quote tool tags).
         if mode == 'none' or not self.tools:
             return {'tool_choice': 'none'}
-        if engine != 'exl3' or not tool_format:
+        if engine not in ('exl3', 'gguf') or not tool_format:
             raise ValueError('Structured tool calling is not configured for this model and engine.')
         if not self.parallel_tool_calls:
             raise ValueError('parallel_tool_calls=false is unsupported by this serving stack; omit it or use true.')

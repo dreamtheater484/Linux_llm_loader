@@ -27,7 +27,7 @@ def manager(tmp_path, monkeypatch):
     mgr.command = AsyncMock(return_value=(0, ''))
     monkeypatch.setattr(b, 'runtime_identity', lambda engine: {'engine': engine, 'version': 'test'})
     manifest = dict(dataset='HumanEval+', revision='test-revision', worker_image='sha256:fixture',
-        selection=b.PROTOCOL, tasks=[dict(id=f'HumanEval/{n}', prompt='def f(): ...') for n in range(3)])
+        selection=b.SUITES['humaneval']['selection'], tasks=[dict(id=f'HumanEval/{n}', prompt='def f(): ...') for n in range(3)])
     manifest['fingerprint'] = b.digest(manifest)
     b.atomic_json(mgr.assets / 'humaneval.json', manifest)
     return mgr
@@ -92,7 +92,7 @@ def test_timeout_errors_and_unattempted_are_not_failed_tests(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize('immediate', [True, False])
-def test_cancel_archives_and_releases_model(tmp_path, monkeypatch, immediate):
+def test_cancel_discards_and_releases_model(tmp_path, monkeypatch, immediate):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
         entered = asyncio.Event()
@@ -106,7 +106,12 @@ def test_cancel_archives_and_releases_model(tmp_path, monkeypatch, immediate):
             await entered.wait()
         await mgr.stop()
         assert not mgr.active
-        saved = mgr.get(mgr.current['id'])
+        with pytest.raises(HTTPException) as exc:
+            mgr.get(mgr.current['id'])
+        assert exc.value.status_code == 404
+        assert mgr.list()['total'] == 0
+        assert not (mgr.root / mgr.current['id']).exists()
+        saved = mgr.current
         assert saved['state'] == 'cancelled'
         assert all(t['state'] in b.TERMINAL_TASKS for t in saved['tasks'])
         assert saved['summary']['score'] is None
@@ -114,21 +119,25 @@ def test_cancel_archives_and_releases_model(tmp_path, monkeypatch, immediate):
     asyncio.run(check())
 
 
-def test_total_deadline_preserves_completed_task(tmp_path, monkeypatch):
+def test_humaneval_has_no_generation_task_or_run_deadline(tmp_path, monkeypatch):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
+        entered = asyncio.Event()
         async def human(index, source, task, manifest):
             if index == 0:
                 task['state'] = 'passed'
             else:
                 task['state'] = 'generating'
+                entered.set()
                 await asyncio.Event().wait()
         mgr.human = human
         await mgr.start('humaneval', 'test', 20.03)
-        await asyncio.wait_for(mgr.task, 1)
-        assert mgr.current['state'] == 'timed_out'
-        assert [t['state'] for t in mgr.current['tasks']] == ['passed', 'timed_out', 'unattempted']
-        assert mgr.current['summary']['score'] is None
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.sleep(.05)  # The old whole-run deadline would have fired.
+        assert mgr.active and mgr.current['state'] == 'running'
+        assert mgr.current['deadline'] is None
+        assert [t['state'] for t in mgr.current['tasks']] == ['passed', 'generating', 'unattempted']
+        await mgr.stop()
     asyncio.run(check())
 
 
@@ -152,7 +161,7 @@ def test_partial_answer_survives_generation_timeout(tmp_path, monkeypatch):
     asyncio.run(check())
 
 
-def test_restart_recovers_interrupted_archive(tmp_path, monkeypatch):
+def test_restart_discards_interrupted_archive(tmp_path, monkeypatch):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
         await mgr.start('humaneval', 'test', 300)
@@ -164,9 +173,10 @@ def test_restart_recovers_interrupted_archive(tmp_path, monkeypatch):
         mgr.save()
         second = manager(tmp_path, monkeypatch)
         second.recover()
-        saved = second.get(result['id'])
-        assert saved['state'] == 'interrupted'
-        assert [t['state'] for t in saved['tasks']] == ['passed', 'cancelled', 'unattempted']
+        with pytest.raises(HTTPException):
+            second.get(result['id'])
+        assert second.list()['total'] == 0
+        assert not (second.root / result['id']).exists()
     asyncio.run(check())
 
 
@@ -218,8 +228,11 @@ def test_command_timeout_kills_process_and_bounds_output(tmp_path, monkeypatch):
 def test_export_api_and_limits(tmp_path, monkeypatch):
     mgr = manager(tmp_path, monkeypatch)
     async def prepare():
+        async def human(index, source, task, manifest):
+            task['state'] = 'passed'
+        mgr.human = human
         await mgr.start('humaneval', 'test', 300)
-        await mgr.stop()
+        await mgr.task
     asyncio.run(prepare())
     monkeypatch.setattr(server, 'evaluations', mgr)
     client = TestClient(server.app)  # Isolated routes, no production lifespan.
@@ -244,29 +257,25 @@ def test_strict_agent_action_and_python_extraction():
     assert b.extract_python('Here is code:\n```python\ndef f(): return 3\n```') == 'def f(): return 3'
 
 
-def test_repository_agent_deadline_stops_commands_before_grading(tmp_path, monkeypatch):
+def test_swebench_has_no_generation_task_or_run_deadline(tmp_path, monkeypatch):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
         manifest = dict(dataset='SWE-bench Lite', revision='fixture', worker_image='sha256:worker', selection=b.SUITES['swebench']['selection'],
             tasks=[dict(id='repo__issue-1', prompt='Fix this', base_commit='a' * 40, image_id='sha256:repo')])
         manifest['fingerprint'] = b.digest(manifest)
         b.atomic_json(mgr.assets / 'swebench.json', manifest)
-        mgr.new_repository = AsyncMock(return_value='disposable-agent')
-        mgr.generate = AsyncMock(side_effect=TimeoutError())
-        mgr.grade_repository = AsyncMock(return_value=({'passed': True}, 'Official passing test report'))
-        async def command(*args, **kwargs):
-            return 0, 'diff --git a/f.py b/f.py\n' if args[:2] == ('docker', 'exec') else ''
-        mgr.command = AsyncMock(side_effect=command)
+        waiting = asyncio.Event()
+        async def repository(index, source, task, selected, deadline=None):
+            waiting.set()
+            await asyncio.Event().wait()
+        mgr.repository = repository
         await mgr.start('swebench', 'test', 600)
-        await mgr.task
-        task = mgr.current['tasks'][0]
-        assert task['state'] == 'passed' and 'grading the current patch' in task['agent_limit']
-        calls = [call.args for call in mgr.command.call_args_list]
-        kill = next(i for i, c in enumerate(calls) if c[:2] == ('docker', 'kill'))
-        restart = next(i for i, c in enumerate(calls) if c[:2] == ('docker', 'start'))
-        diff = next(i for i, c in enumerate(calls) if c[:2] == ('docker', 'exec'))
-        assert kill < restart < diff
-        assert mgr.grade_repository.await_args.args[1].startswith('diff --git')
+        await asyncio.wait_for(waiting.wait(), 1)
+        await asyncio.sleep(.05)
+        assert mgr.current['state'] == 'running'
+        assert mgr.current['deadline'] is None
+        assert mgr.current['evaluation']['timing_policy'].startswith('No generation')
+        await mgr.stop()
     asyncio.run(check())
 
 
@@ -324,12 +333,36 @@ def repository_manifest(mgr):
     return manifest
 
 
+@pytest.mark.parametrize('minutes,count,preset', [(10, 20, 'short'), (20, 40, 'medium'), (30, 80, 'long')])
+def test_humaneval_presets_select_nested_subsets_without_deadlines(tmp_path, monkeypatch, minutes, count, preset):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        manifest = mgr.manifest('humaneval')
+        manifest.pop('fingerprint')
+        manifest['tasks'] = [dict(id=f'HumanEval/{n}', prompt='def f(): ...') for n in range(80)]
+        manifest['fingerprint'] = b.digest(manifest)
+        b.atomic_json(mgr.assets / 'humaneval.json', manifest)
+        async def human(index, source, task, selected):
+            task['state'] = 'passed'
+        mgr.human = human
+        await mgr.start('humaneval', 'test', minutes * 60)
+        await mgr.task
+        saved = mgr.get(mgr.current['id'])
+        assert saved['state'] == 'complete' and saved['summary']['total'] == count
+        assert saved['preset'] == preset and saved['deadline'] is None
+        assert saved['evaluation']['preset'] == preset
+        assert saved['evaluation']['timing_policy'].startswith('No generation')
+        assert saved['dataset']['pool_fingerprint'] == manifest['fingerprint']
+        assert [t['id'] for t in saved['tasks']] == [f'HumanEval/{n}' for n in range(count)]
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize('minutes,count', [(10, 1), (20, 2), (30, 3)])
 def test_repository_presets_select_and_archive_only_budgeted_tasks(tmp_path, monkeypatch, minutes, count):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
         original = repository_manifest(mgr)
-        async def repository(index, source, task, manifest, deadline):
+        async def repository(index, source, task, manifest, deadline=None):
             task.update(state='passed', grade={'passed': True})
         mgr.repository = AsyncMock(side_effect=repository)
         await mgr.start('swebench', 'test', minutes * 60)
@@ -345,28 +378,30 @@ def test_repository_presets_select_and_archive_only_budgeted_tasks(tmp_path, mon
     asyncio.run(check())
 
 
-def test_repository_remaining_run_budget_reserves_grading(tmp_path, monkeypatch):
+def test_repository_uses_only_action_command_and_grader_safeguards(tmp_path, monkeypatch):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
         repository_manifest(mgr)
         mgr.new_repository = AsyncMock(return_value='agent')
-        mgr.generate = AsyncMock(side_effect=TimeoutError())
+        mgr.generate = AsyncMock(return_value=dict(role='assistant', content='{"finish":true}'))
         mgr.grade_repository = AsyncMock(return_value=({'passed': False}, 'Required tests failed'))
+        mgr.command = AsyncMock(return_value=(0, ''))
         await mgr.start('swebench', 'test', 600)
-        # A short remaining run must cut inference BEFORE its fixed 420s cap.
-        mgr.current['budget_seconds'] = 220
         await mgr.task
         task = mgr.current['tasks'][0]
-        assert 0 < task['generation_budget_seconds'] <= 20
+        assert 'generation_budget_seconds' not in task and 'time_budget_seconds' not in task
+        assert mgr.current['deadline'] is None
         assert mgr.grade_repository.await_count == 1
+        assert mgr.grade_repository.await_args.kwargs['timeout'] == b.SUITES['swebench']['grader_seconds'] == 150
         assert task['state'] == 'failed' and not task['patch_present']
         assert 'No patch was produced' in task['detail']
-        assert 'grading the current patch' in b.report_markdown(mgr.current)
-        assert 'Actions' not in b.report_markdown(mgr.current)  # No completed action.
+        assert 'no run deadline' in b.report_markdown(mgr.current)
+        assert mgr.current['evaluation']['command_safety_seconds'] == 45
+        assert mgr.current['evaluation']['max_steps'] == 40
     asyncio.run(check())
 
 
-def test_repository_patch_survives_cancellation_and_feedback_is_recorded(tmp_path, monkeypatch):
+def test_repository_feedback_is_recorded_then_discarded_on_cancellation(tmp_path, monkeypatch):
     async def check():
         mgr = manager(tmp_path, monkeypatch)
         repository_manifest(mgr)
@@ -386,11 +421,12 @@ def test_repository_patch_survives_cancellation_and_feedback_is_recorded(tmp_pat
         mgr.generate = generate
         await mgr.start('swebench', 'test', 600)
         await asyncio.wait_for(waiting.wait(), 1)
-        await mgr.stop()
         root = mgr.root / mgr.current['id'] / 'task-01'
         assert (root / 'patch.diff').read_text() == patch
-        assert mgr.current['tasks'][0]['patch_present'] and mgr.current['state'] == 'cancelled'
         assert '39 actions remaining' in json.loads((root / 'trajectory.json').read_text())[0]['budget_feedback']
+        await mgr.stop()
+        assert mgr.current['tasks'][0]['patch_present'] and mgr.current['state'] == 'cancelled'
+        assert not root.exists()
     asyncio.run(check())
 
 

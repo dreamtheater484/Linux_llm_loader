@@ -67,11 +67,43 @@ def gguf_metadata(path):
         result = {}
         for _ in range(count):
             key = string()
-            keep = key in ('general.architecture', 'general.name', 'general.type', 'split.count', 'split.no', 'tokenizer.chat_template') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count'))
+            keep = key in ('general.architecture', 'general.name', 'general.type', 'split.count', 'split.no', 'tokenizer.chat_template') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count', '.expert_count'))
             result_value = value(unpack('<I'), keep)
             if keep:
                 result[key] = result_value
-        return result
+    return result
+
+
+def gguf_quant(name):
+    """Quant labels start with a quant type and digit, never the Q in Qwen."""
+    matches = re.findall(r'(?:^|[-_])((?:UD-)?(?:IQ\d|Q\d|MXFP\d|NVFP\d|BF16|F16|F32)[\w.]*)', name)
+    return matches[-1] if matches else 'Mixed'
+
+
+def gguf_projector(path, root):
+    # Require an unambiguous checkpoint/family match. In particular, never take
+    # the first projector in a directory containing several model families.
+    def normalize(name):
+        name = name.lower().replace('_', '-')
+        name = re.sub(r'(?:^|-)mmproj(?:-|$)', '-', name)
+        name = re.sub(r'-(?:ud-)?(?:iq\d|q\d|mxfp\d|nvfp\d|bf16|f16|f32).*$', '', name)
+        return name.strip('-')
+    model_name = normalize(path.stem)
+    candidates = set(path.parent.glob('*mmproj*.gguf')) | set(root.glob('*mmproj*.gguf'))
+    ranked = []
+    family = re.match(r'qwen[\d.]+-\d+b(?:-a\d+b)?(?=-|$)', model_name)
+    for candidate in candidates:
+        candidate_name = normalize(candidate.stem)
+        if candidate_name == model_name:
+            ranked.append((2, candidate))
+        elif family and candidate_name == family[0]:
+            ranked.append((1, candidate))
+    if ranked:
+        best = max(score for score, _ in ranked)
+        choices = [candidate for score, candidate in ranked if score == best]
+        if len(choices) == 1:
+            return str(choices[0])
+    return None
 
 
 def native_model(path, root):
@@ -160,7 +192,7 @@ def scan(root):
     for directory in dirs:
         for path in directory.glob('*.gguf'):
             lower = path.name.lower()
-            if any(s in lower for s in ('mmproj', 'drafter', 'dspark', 'mtp-')):
+            if any(s in lower for s in ('mmproj', 'drafter', 'dspark', 'fastmtp')) or lower.startswith('mtp-'):
                 continue
             match = re.search(r'-(\d{5})-of-(\d{5})\.gguf$', path.name)
             if match and int(match[1]) != 1:
@@ -172,15 +204,23 @@ def scan(root):
                 shards = [path] if not match else [path.with_name(path.name[:match.start()] + f'-{i:05d}-of-{int(match[2]):05d}.gguf') for i in range(1, int(match[2]) + 1)]
                 issues = ['Missing shard: ' + p.name for p in shards if not p.is_file()]
                 arch = meta.get('general.architecture', 'unknown')
-                projector = None
-                for tag, filename in [('Qwen3.8-Flash-Next', 'Qwen3.8-Flash-Next-mmproj-F16.gguf'), ('DeepSeek-V4-Flash-Vision-Exp', 'mmproj-DeepSeek-V4-Flash-Vision-Exp-Q8_0.gguf'), ('GLM-5.3-Flash', 'mmproj-zai-org.GLM-5.3-Flash.f16.gguf')]:
-                    if tag in path.name and (root / filename).is_file():
-                        projector = str(root / filename)
+                projector = gguf_projector(path, root)
+                # Retain explicitly known legacy projector pairs too.
+                if not projector:
+                    for tag, filename in [('DeepSeek-V4-Flash-Vision-Exp', 'mmproj-DeepSeek-V4-Flash-Vision-Exp-Q8_0.gguf'), ('GLM-5.3-Flash', 'mmproj-zai-org.GLM-5.3-Flash.f16.gguf')]:
+                        if tag in path.name and (root / filename).is_file():
+                            projector = str(root / filename)
+                nextn = int(meta.get(arch + '.nextn_predict_layers', 0))
+                mtp = nextn > 0 and arch in ('qwen35', 'qwen35moe')
+                template = meta.get('tokenizer.chat_template', '')
                 models.append(dict(path=str(path), name=path.name[:match.start()] if match else path.stem,
-                    format='GGUF', quant=next(iter(re.findall(r'(?:UD-)?(?:IQ|Q|MXFP|NVFP)[\w.]+', path.stem)), 'Mixed'),
-                    architecture=arch, context=meta.get(arch + '.context_length', 4096), reasoning=inspect_reasoning(meta.get('tokenizer.chat_template', '')),
-                    vision=bool(projector), mtp=False, experts=0, layers=meta.get(arch + '.block_count', 0),
-                    draft_limit=4,
+                    format='GGUF', quant=gguf_quant(path.name[:match.start()] if match else path.stem),
+                    architecture=arch, context=meta.get(arch + '.context_length', 4096), reasoning=inspect_reasoning(template),
+                    vision=bool(projector), mtp=mtp, mtp_kind='embedded' if mtp else None,
+                    mtp_note='Embedded MTP weights' if mtp else ('MTP is not supported for this architecture yet' if nextn else 'This GGUF does not contain MTP weights'),
+                    tool_format='llama-jinja' if arch in ('qwen35', 'qwen35moe') and '<tool_call>' in template and 'tools' in template else None,
+                    experts=meta.get(arch + '.expert_count', 0), layers=meta.get(arch + '.block_count', 0),
+                    draft_limit=4, nextn_layers=nextn,
                     ngram=False, bytes=sum(p.stat().st_size for p in shards if p.is_file()), issues=issues,
                     receipt=None, projector=projector, recommended=False, engines=['gguf']))
             except (OSError, ValueError, KeyError, struct.error) as exc:

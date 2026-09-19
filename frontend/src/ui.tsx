@@ -13,11 +13,14 @@ export function medianPrompt(result:any):number|null {
 
 export function Performance({metrics,compact=false}:{metrics:any;compact?:boolean}) {
   const cached=metrics?.usage?.prompt_tokens_details?.cached_tokens;
+  const predictions=metrics?.usage?.completion_tokens_details;
+  const accepted=predictions?.accepted_prediction_tokens;
+  const drafted=accepted==null?null:accepted+(predictions?.rejected_prediction_tokens??0);
   return <div className={`performance ${compact?'compact-performance':''}`}>
     <span className="speed prompt-speed" title={`Speed reported by the engine while processing the prompt. ${formatNumber(cached??0,0)} input tokens reused from cache.`}>
       <ArrowDownToLine size={14}/><span>Prompt processing<strong>{formatNumber(promptSpeed(metrics))}<small>tok/s</small></strong></span>
     </span>
-    <span className="speed decode-speed" title="Generation speed includes thinking and the final answer. Prompt processing is measured separately.">
+    <span className="speed decode-speed" title={`Generation speed includes thinking and the final answer. Prompt processing is measured separately.${drafted>0?` MTP: ${formatNumber(accepted,0)} of ${formatNumber(drafted,0)} draft tokens accepted.`:''}`}>
       <Zap size={14}/><span>Decoding<strong>{formatNumber(metrics?.tokens_per_second)}<small>tok/s</small></strong></span>
     </span>
     <span className="speed latency" title="Time from sending the request to the first visible token, including prompt processing.">
