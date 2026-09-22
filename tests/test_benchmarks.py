@@ -12,6 +12,7 @@ import pytest
 
 from loader import benchmarks as b, server
 from loader.engines import Settings
+from loader.reasoning import inspect_reasoning
 
 
 def manager(tmp_path, monkeypatch):
@@ -43,6 +44,8 @@ def test_config_snapshot_archive_and_score(tmp_path, monkeypatch):
             task.update(state='passed' if index < 2 else 'failed', grade={'passed': index < 2})
         mgr.human = human
         result = await mgr.start('humaneval', 'test', 300)
+        live = mgr.snapshot()
+        assert live['state'] == 'running' and live['elapsed_seconds'] >= 0
         mgr.supervisor.settings.kv = 'FP16'
         mgr.supervisor.model['quant'] = 'changed later'
         await mgr.task
@@ -71,6 +74,42 @@ def test_config_snapshot_archive_and_score(tmp_path, monkeypatch):
         assert mgr.list(query='unrelated')['all_total'] == 1
         assert mgr.list(offset=1)['items'] == []
     asyncio.run(check())
+
+
+def test_benchmark_thinking_override_is_frozen_and_does_not_change_profile(tmp_path, monkeypatch):
+    async def check():
+        mgr = manager(tmp_path, monkeypatch)
+        mgr.supervisor.model['reasoning'] = inspect_reasoning("{% if enable_thinking %}{% if reasoning_effort in ['low', 'medium', 'xhigh'] %}{% endif %}{% endif %}")
+        async def stream(*args, **kwargs):
+            assert kwargs['reasoning_effort'] == 'medium'
+            yield {'type': 'complete', 'usage': {}}
+        mgr.supervisor.stream = stream
+        async def human(index, source, task, manifest):
+            await mgr.generate([{'role': 'user', 'content': 'Test'}], task, index)
+            task['state'] = 'passed'
+        mgr.human = human
+        result = await mgr.start('humaneval', 'test', 600, 'medium')
+        assert mgr.supervisor.settings.reasoning_effort == 'default'
+        mgr.supervisor.settings.reasoning_effort = 'off'
+        await mgr.task
+        saved = mgr.get(result['id'])
+        assert saved['settings']['reasoning_effort'] == 'medium'
+        assert saved['evaluation']['reasoning'] == 'medium'
+        assert saved['summary']['passed'] == 3
+        with pytest.raises(ValueError, match='does not support'):
+            await mgr.start('humaneval', 'test', 600, 'high')
+        assert mgr.list()['total'] == 1
+    asyncio.run(check())
+
+
+def test_evaluation_api_forwards_native_thinking_choice(monkeypatch):
+    start = AsyncMock(return_value={'id': 'test'})
+    monkeypatch.setattr(server.evaluations, 'start', start)
+    client = TestClient(server.app)
+    response = client.post('/api/evaluations', headers={'X-Inflect-Local': '1'}, json={
+        'suite': 'humaneval', 'model_id': 'test', 'budget_minutes': 20, 'reasoning_effort': 'low'})
+    assert response.status_code == 202
+    start.assert_awaited_once_with('humaneval', 'test', 1200, 'low')
 
 
 def test_timeout_errors_and_unattempted_are_not_failed_tests(tmp_path, monkeypatch):
@@ -240,7 +279,7 @@ def test_export_api_and_limits(tmp_path, monkeypatch):
     assert client.get('/api/evaluations?limit=101').status_code == 422
     assert client.get('/api/evaluations?offset=-1').status_code == 422
     assert client.post('/api/evaluations', json={}).status_code == 403
-    assert client.post('/api/evaluations', json=dict(suite='humaneval', model_id='test', budget_minutes=31), headers={'X-Lumen-Local':'1'}).status_code == 422
+    assert client.post('/api/evaluations', json=dict(suite='humaneval', model_id='test', budget_minutes=31), headers={'X-Inflect-Local':'1'}).status_code == 422
     assert client.get(f'/api/evaluations/{run_id}/report').status_code == 200
     assert client.get(f'/api/evaluations/{run_id}/json').json()['settings']['draft_tokens'] == 3
     assert client.get(f'/api/evaluations/{run_id}/archive').headers['content-type'] == 'application/zip'
@@ -317,7 +356,7 @@ def test_preparation_publishes_only_verified_subset_and_keeps_diagnostics(tmp_pa
 
 def test_old_network_dependent_subset_must_be_prepared_again(tmp_path, monkeypatch):
     mgr = manager(tmp_path, monkeypatch)
-    legacy = dict(dataset='SWE-bench Lite', selection='lumen-coding-v1', tasks=[])
+    legacy = dict(dataset='SWE-bench Lite', selection='inflect-coding-v1', tasks=[])
     legacy['fingerprint'] = b.digest(legacy)
     b.atomic_json(mgr.assets / 'swebench.json', legacy)
     with pytest.raises(ValueError, match='subset is outdated'):

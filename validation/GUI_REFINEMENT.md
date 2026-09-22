@@ -1,4 +1,4 @@
-# Lumen interface refinement
+# Inflect interface refinement
 
 ## Delivered
 

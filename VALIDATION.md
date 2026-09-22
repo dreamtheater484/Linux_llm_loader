@@ -1,4 +1,4 @@
-# Lumen validation
+# Inflect validation
 
 This repository deliberately does not publish machine-generated benchmark reports, local paths, hardware serial-like identifiers, profile names, prompts, or chat output. Validation artifacts are written locally and ignored by Git.
 

@@ -17,11 +17,11 @@ if ! command -v docker >/dev/null; then
     apt-get install -y docker.io
 fi
 # Ubuntu 26.04 moved sg/newgrp out of the base login package. This lets
-# an existing Lumen session use the membership granted below immediately.
+# an existing Inflect session use the membership granted below immediately.
 if ! command -v sg >/dev/null; then
     apt-get install -y util-linux-extra
 fi
 systemctl enable --now docker
 usermod -aG docker "$benchmark_user"
 runuser -u "$benchmark_user" -- docker info --format 'Docker Engine {{.ServerVersion}} is ready.'
-echo 'Docker installed. Lumen can activate the Docker group without a new login.'
+echo 'Docker installed. Inflect can activate the Docker group without a new login.'

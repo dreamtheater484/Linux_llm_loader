@@ -1,9 +1,11 @@
+import {correctedRam} from './memory';
 import {useRef,useState} from 'react';
 import type {PointerEvent} from 'react';
 import {ArrowDown, ArrowUp, Check, ChevronDown, Copy, GripVertical, Pencil, Play, RotateCcw, Settings2, Trash2} from 'lucide-react';
 import type {Model, Settings, Profile, BenchmarkResult, ProfileSpeedSource} from './types';
 import {formatNumber} from './ui';
 import './profiles.css';
+import {reasoningLabel} from './reasoning';
 
 export function suggestedProfileName(model:Model, settings:Settings) {
   const name=model.name.replace(/-Uncensored-HauhauCS-Aggressive/i,' Agg.').replace(/[-_]?(EXL3|NVFP4|UD-|Q\d|IQ\d|MXFP\d).*$/,'').replace(/[-_]/g,' ');
@@ -39,9 +41,9 @@ export function ProfileList(props:Props) {
   const max=(value:number|null|undefined,bound:string)=>!bound||(value!=null&&value/2**30<=Number(bound));
   const visible=profiles.filter(p=>{
     const model=models.find(m=>m.id===p.settings.model_id),text=normalize(`${model?.name} ${model?.quant} ${p.name}`);
-    return normalize(query).split(/\s+/).filter(Boolean).every(term=>text.includes(term))&&(!modelFilter||modelFilter===p.settings.model_id)&&(!context||p.settings.context===Number(context))&&min(p.performance?.decode_tps,decode)&&min(p.performance?.prefill_tps,prefill)&&max(p.loaded_memory?.vram_bytes,vram)&&max(p.loaded_memory?.ram_bytes,ram);
+    return normalize(query).split(/\s+/).filter(Boolean).every(term=>text.includes(term))&&(!modelFilter||modelFilter===p.settings.model_id)&&(!context||p.settings.context===Number(context))&&min(p.performance?.decode_tps,decode)&&min(p.performance?.prefill_tps,prefill)&&max(p.loaded_memory?.vram_bytes,vram)&&max(correctedRam(p.loaded_memory),ram);
   });
-  const sortValue=(p:Profile)=>sort==='decode'?p.performance?.decode_tps:sort==='prefill'?p.performance?.prefill_tps:sort==='context'?p.settings.context:sort==='vram'?p.loaded_memory?.vram_bytes:p.loaded_memory?.ram_bytes;
+  const sortValue=(p:Profile)=>sort==='decode'?p.performance?.decode_tps:sort==='prefill'?p.performance?.prefill_tps:sort==='context'?p.settings.context:sort==='vram'?p.loaded_memory?.vram_bytes:correctedRam(p.loaded_memory);
   if(sort!=='saved')visible.sort((a,b)=>{
     if(sort==='model')return (models.find(m=>m.id===a.settings.model_id)?.name||a.name).localeCompare(models.find(m=>m.id===b.settings.model_id)?.name||b.name);
     const av=sortValue(a),bv=sortValue(b);return av==null?(bv==null?0:1):bv==null?-1:(av-bv)*(sort==='vram'||sort==='ram'?1:-1);
@@ -70,12 +72,12 @@ export function ProfileList(props:Props) {
     <div className="profile-filters">
       <label className="profile-search">Model / quant / profile<input aria-label="Find saved profiles" placeholder="e.g. Qwen 27B Q6" value={query} onChange={e=>setQuery(e.target.value)}/></label>
       <label className="profile-model-filter">Model &amp; quant<select value={modelFilter} onChange={e=>setModelFilter(e.target.value)}><option value="">All saved models</option>{savedModels.map(m=><option key={m.id} value={m.id}>{m.name} · {m.quant}</option>)}</select></label>
-      <label>Sort by<select value={sort} onChange={e=>setSort(e.target.value)}><option value="saved">My saved order</option><option value="model">Model name</option><option value="decode">Fastest generation</option><option value="prefill">Fastest prefill</option><option value="context">Largest context</option><option value="vram">Least VRAM</option><option value="ram">Least RAM</option></select></label>
+      <label>Sort by<select value={sort} onChange={e=>setSort(e.target.value)}><option value="saved">My saved order</option><option value="model">Model name</option><option value="decode">Fastest generation</option><option value="prefill">Fastest prefill</option><option value="context">Largest context</option><option value="vram">Least VRAM</option><option value="ram">Least total RAM</option></select></label>
       <label>Generation ≥ tok/s<input type="number" min="0" placeholder="Any" value={decode} onChange={e=>setDecode(e.target.value)}/></label>
       <label>Prefill ≥ tok/s<input type="number" min="0" placeholder="Any" value={prefill} onChange={e=>setPrefill(e.target.value)}/></label>
       <label>Context<select value={context} onChange={e=>setContext(e.target.value)}><option value="">Any context</option>{[...new Set(profiles.map(p=>p.settings.context))].sort((a,b)=>a-b).map(c=><option key={c} value={c}>{c/1024}K</option>)}</select></label>
       <label>VRAM ≤ GiB<input type="number" min="0" step="0.1" placeholder="Any" value={vram} onChange={e=>setVram(e.target.value)}/></label>
-      <label>RAM ≤ GiB<input type="number" min="0" step="0.1" placeholder="Any" value={ram} onChange={e=>setRam(e.target.value)}/></label>
+      <label>Total RAM ≤ GiB<input type="number" min="0" step="0.1" placeholder="Any" value={ram} onChange={e=>setRam(e.target.value)}/></label>
     </div>
     <div className="profile-filter-summary"><span>{visible.length} of {profiles.length} profiles · Benchmark data refreshes every 3 seconds</span>{!canReorder&&<button onClick={reset}>Reset filters &amp; saved order</button>}<span>{canReorder?'Drag to arrange':'Drag ordering paused while filtering or sorting'}</span></div>
     {!visible.length&&<div className="profile-no-matches">No profiles match these filters. Unknown measurements are excluded by speed and memory limits.<button className="secondary" onClick={reset}>Reset filters</button></div>}
@@ -100,15 +102,15 @@ export function ProfileList(props:Props) {
           <span className="profile-scan-generation" title={`Generation · ${sourceLabel(profile.performance?.decode_source)}`}><span>Gen</span> <b>{formatNumber(profile.performance?.decode_tps)}</b><small>tok/s</small></span>
           <span className="profile-scan-prefill" title={`Prefill · ${sourceLabel(profile.performance?.prefill_source)}`}><span>Prefill</span> <b>{formatNumber(profile.performance?.prefill_tps,0)}</b><small>tok/s</small></span>
           <span title="Context window / KV cache precision"><b>{s.context/1024}K</b><small>/ {s.kv} KV</small></span>
-          <span title={profile.loaded_memory?`Total system VRAM / RAM after load · ${new Date(profile.loaded_memory.measured_at*1000).toLocaleString()}`:'Load this setup once to record total system VRAM / RAM'}><span>VRAM/RAM</span> <b>{gib(profile.loaded_memory?.vram_bytes)}/{gib(profile.loaded_memory?.ram_bytes)}</b><small>GiB</small></span>
+          <span title={profile.loaded_memory?`Total system VRAM / occupied RAM, including cache · ${new Date(profile.loaded_memory.measured_at*1000).toLocaleString()}`:'Load this setup to record VRAM and occupied RAM, including cache'}><span>VRAM/RAM</span> <b>{gib(profile.loaded_memory?.vram_bytes)}/{gib(correctedRam(profile.loaded_memory))}</b><small>GiB{profile.loaded_memory&&correctedRam(profile.loaded_memory)==null?' · reload to measure RAM':''}</small></span>
         </div>
-        <div className="profile-card-footer"><span className="profile-secondary-settings">Vision {s.vision?'on':'off'} · MTP {s.prediction==='mtp'?`on/${s.draft_tokens}`:'off'} · CPU {s.cpu_percent}%</span>          {!trash&&<button className="icon-btn" disabled={busy} title="Duplicate profile" aria-label={`Duplicate ${profile.name}`} onClick={()=>props.onDuplicate(profile)}><Copy size={16}/></button>}
+        <div className="profile-card-footer"><span className="profile-secondary-settings">Vision {s.vision?'on':'off'} · MTP {s.prediction==='mtp'?`on/${s.draft_tokens}`:'off'}{model?.ngram&&` · N-gram ${s.ngram_ram===false?'storage':'RAM'}`} · CPU {s.cpu_percent}% · Think: {reasoningLabel(s.reasoning_effort,model)}</span>          {!trash&&<button className="icon-btn" disabled={busy} title="Duplicate profile" aria-label={`Duplicate ${profile.name}`} onClick={()=>props.onDuplicate(profile)}><Copy size={16}/></button>}
           {trash?<button className="secondary" disabled={busy} onClick={()=>props.onRestore(profile)}><RotateCcw size={14}/>Restore</button>:
             <button className="primary profile-load" disabled={busy||!model} aria-label={`Load ${profile.name}`} onClick={()=>props.onLoad(profile)}><Play size={13}/>Load</button>}
         </div>
         {open&&<div className="compact-profile-details" id={`profile-${profile.id}`}>
-          <p className="profile-measurement-detail">Generation: {sourceLabel(profile.performance?.decode_source)} · Prefill: {sourceLabel(profile.performance?.prefill_source)}<br/>{profile.loaded_memory?`System VRAM/RAM totals with this setup loaded · measured ${new Date(profile.loaded_memory.measured_at*1000).toLocaleString()}`:'Load once to measure total system VRAM and RAM usage.'}</p>
-          <div className="profile-detail-grid"><div><span>Context / cache</span><strong>{s.context/1024}K · {s.kv}</strong></div><div><span>Prediction</span><strong>{s.prediction==='mtp'?`MTP on · ${s.draft_tokens} draft tokens`:'MTP off'}</strong></div><div><span>Vision</span><strong>{s.vision?'On':'Off'}</strong></div><div><span>CPU placement</span><strong>{s.cpu_percent}% · {s.cpu_threads} threads{s.engine==='gguf'||model?.format==='GGUF'?` · ${s.gguf_offload}`:''}</strong></div><div><span>Generation</span><strong>{s.max_output/1024}K output · temp {s.temperature}</strong></div><div><span>Thinking / chunk</span><strong>{s.reasoning_effort} · {s.chunk_size} tokens</strong></div></div>
+          <p className="profile-measurement-detail">Generation: {sourceLabel(profile.performance?.decode_source)} · Prefill: {sourceLabel(profile.performance?.prefill_source)}<br/>{profile.loaded_memory?(correctedRam(profile.loaded_memory)!=null?`System totals after load · RAM includes ${gib(profile.loaded_memory.ram_cache_bytes)} GiB cache. Model resident: ${gib(profile.loaded_memory.model_memory?.resident_bytes)} GiB (included). Measured ${new Date(profile.loaded_memory.measured_at*1000).toLocaleString()}.`:'RAM needs a new measurement: the previous reading excluded reclaimable model pages. Load this profile to update it.'):'Load once to measure system VRAM, occupied RAM and model resident memory.'}</p>
+          <div className="profile-detail-grid"><div><span>Context / cache</span><strong>{s.context/1024}K · {s.kv}</strong></div><div><span>Prediction</span><strong>{s.prediction==='mtp'?`MTP on · ${s.draft_tokens} draft tokens`:'MTP off'}</strong></div><div><span>Vision</span><strong>{s.vision?'On':'Off'}</strong></div>{model?.ngram&&<div><span>PLE n-gram table</span><strong>{s.ngram_ram===false?'Storage streaming':'System RAM'}</strong></div>}<div><span>CPU placement</span><strong>{s.cpu_percent}% · {s.cpu_threads} threads{s.engine==='gguf'||model?.format==='GGUF'?` · ${s.gguf_offload}`:''}</strong></div><div><span>Generation</span><strong>{s.max_output/1024}K output · temp {s.temperature}</strong></div><div><span>Thinking / chunk</span><strong>{reasoningLabel(s.reasoning_effort,model)} · {s.chunk_size} tokens</strong></div></div>
           {results.length>0&&<section className="profile-results"><h3>Benchmarks · matching settings</h3>{results.map(r=><Result key={r.id} result={r}/>)}</section>}
           {related.length>0&&<details className="related-benchmarks"><summary>{related.length} benchmark{related.length===1?'':'s'} for this model with different settings</summary><p>These results do not determine this profile’s speed. Open the benchmark archive to compare configurations.</p>{related.map(r=><Result key={r.id} result={r}/>)}</details>}
           <div className="profile-detail-actions">

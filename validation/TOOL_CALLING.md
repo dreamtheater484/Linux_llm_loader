@@ -2,7 +2,7 @@
 
 ## Root cause
 
-Three independent omissions broke Lumen → TabbyAPI → ExLlamaV3 tool calling:
+Three independent omissions broke Inflect → TabbyAPI → ExLlamaV3 tool calling:
 
 1. `loader/server.py::openai_chat` constructed a `ChatRequest` without `tools`, `tool_choice`, or `parallel_tool_calls`. `Supervisor.stream` consequently sent no function definitions to Tabby's native chat template. This explains unchanged prompt-token counts with and without tools.
 2. `loader/engines.py::launch` did not select Tabby's `tool_format`. Its default disables tool parsing, so generated Qwen pseudo-XML was returned as ordinary text.
@@ -17,7 +17,7 @@ Live verification exposed a fourth issue: the pinned Tabby `qwen3_coder` parser 
 - `loader/server.py::openai_chat` returns OpenAI-compatible non-streaming messages and indexed streaming deltas. Streaming calls can arrive as one complete argument fragment because the native engine buffers them until parsing finishes.
 - `loader/engines.py::launch` enables `qwen3_coder` only for the matching Qwen architecture and selected template. Tool parsing is disabled for requests without active tools, and reasoning cannot produce executable calls.
 - `patches/tabby-qwen-tool-schema.patch` passes schemas through Tabby's collector/dispatcher to its native Qwen parser. Explicit string parameters remain strings; explicit boolean parameters accept `True`/`False`. It rejects duplicate parameters and preserves output-limit termination instead of relabeling truncated output as completed tool calls. Setup applies the patch idempotently.
-- Invalid or unoffered calls produce an API error; Lumen never executes functions or parses arbitrary prose into calls.
+- Invalid or unoffered calls produce an API error; Inflect never executes functions or parses arbitrary prose into calls.
 
 The patch targets TabbyAPI commit `53da7919d4e45c63f4acbcbbc00cbe0f60a1ce65`. ExLlamaV3 weights, quantization, offload, context, vision, MTP, and saved profiles are unchanged.
 
@@ -48,7 +48,7 @@ Verified on the deployed Qwen/ExLlamaV3 installation on 2026-09-16:
 - `none` worked in both modes; `required`, named choices, and unsupported Qwen reasoning levels returned HTTP 422.
 - Final model state: ready and idle; loaded settings and saved profiles unchanged. The LAN header requirement and authenticated loopback-only engine listener were rechecked after deployment.
 
-Lumen was restarted and Qwen reloaded after coordination. No further server restart is needed for this deployment.
+Inflect was restarted and Qwen reloaded after coordination. No further server restart is needed for this deployment.
 
 Regression tests cover request forwarding, fragmented and multiple calls, ID matching, typed arguments, invalid/truncated calls, unsupported options, reasoning separation, and the existing LAN/header checks. The optional native-parser test runs the actual installed Tabby parser against strings, booleans, arrays, objects, duplicate parameters, and non-evaluated command-looking text.
 
@@ -60,4 +60,4 @@ These are API and parser tests. OpenCode is on a separate machine and was stoppe
 
 The native parser uses direct parameter `type` declarations for its type corrections. Complex unions/references retain native coercion and must pass final schema validation. A model can still generate an invalid name, arguments, or truncated response; these fail explicitly instead of being executed. Automatic tool execution and forced tool selection are not added.
 
-Lumen remains on the configured private LAN address. Tabby remains authenticated on loopback. Internal credentials and machine-specific settings are not included in this report.
+Inflect remains on the configured private LAN address. Tabby remains authenticated on loopback. Internal credentials and machine-specific settings are not included in this report.

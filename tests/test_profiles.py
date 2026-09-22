@@ -13,7 +13,7 @@ def test_duplicate_order_and_restore_keep_independent_profiles(tmp_path):
     settings = Settings(model_id='test').model_dump()
     saved = [{'id': 'first', 'name': 'First', 'settings': settings}, {'id': 'second', 'name': 'Second', 'settings': settings}]
     (tmp_path / 'profiles.json').write_text(json.dumps(saved))
-    headers = {'X-Lumen-Local': '1'}
+    headers = {'X-Inflect-Local': '1'}
     with patch.object(server, 'STATE', tmp_path), patch.object(server.supervisor, 'lookup', return_value=model()), patch.object(server.supervisor, 'refresh'):
         with TestClient(server.app) as client:
             result = client.post('/api/profiles/first/duplicate', json={}, headers=headers)
@@ -97,19 +97,35 @@ def test_loaded_memory_persists_by_loading_settings(tmp_path):
     from loader.profiles import record_loaded_memory, load_key
     s = Settings(model_id='test').model_dump()
     m = model()
-    hardware = dict(timestamp=123, gpu=dict(used_bytes=30*2**30, name='GPU'), ram=dict(used_bytes=70*2**30))
+    hardware = dict(timestamp=123, gpu=dict(used_bytes=30*2**30, name='GPU'),
+                    ram=dict(used_bytes=70*2**30, accounting='physical_including_cache_v1', cache_bytes=60*2**30),
+                    model_memory=dict(resident_bytes=65*2**30))
     assert record_loaded_memory(tmp_path, s, m, hardware)
     with sqlite3.connect(tmp_path / 'results.sqlite3') as db:
         measurements = {key:json.loads(value) for key,value in db.execute('SELECT * FROM profile_loads')}
     p = dict(id='p', name='Profile', settings=s)
     value = enrich_profile(p,m,[],measurements)['loaded_memory']
     assert value['vram_bytes'] == 30*2**30 and value['ram_bytes'] == 70*2**30
+    assert value['ram_cache_bytes'] == 60*2**30
+    assert value['model_memory']['resident_bytes'] == 65*2**30
     assert value['scope'] == 'system_total' and value['measured_at'] == 123
     assert load_key(dict(s, temperature=1.1,max_output=8192,reasoning_effort='off'),m) == load_key(s,m)
     assert load_key(dict(s, engine='exl3'),m) == load_key(s,m)
     assert enrich_profile(dict(p,settings=dict(s,kv='Q4')),m,[],measurements)['loaded_memory'] is None
     assert not record_loaded_memory(tmp_path,s,m,dict(timestamp=124,gpu={'used_bytes':float('nan')},ram={'used_bytes':True}))
     assert record_loaded_memory(tmp_path,s,m,dict(timestamp=125,gpu=None,ram={'used_bytes':50*2**30}))
+
+
+def test_legacy_profile_ram_is_not_used_for_capacity_comparisons():
+    from loader.profiles import load_key
+    s = Settings(model_id='test').model_dump()
+    m = model()
+    original = dict(ram_bytes=13*2**30, vram_bytes=8*2**30, measured_at=1)
+    result = enrich_profile(dict(id='p',name='Test',settings=s), m, [], {load_key(s,m):original})
+    assert result['loaded_memory']['ram_bytes'] is None
+    assert result['loaded_memory']['legacy_ram_bytes'] == 13*2**30
+    assert result['loaded_memory']['vram_bytes'] == 8*2**30
+    assert original['ram_bytes'] == 13*2**30
 
 
 def test_profile_recovers_prefill_from_old_speed_tests(tmp_path, monkeypatch):

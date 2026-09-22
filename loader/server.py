@@ -28,7 +28,7 @@ import psutil
 
 from .engines import PROJECT, RUNTIME, Settings, engine_inventory, launch, validate
 from .library import scan
-from .metrics import Telemetry, number
+from .metrics import Telemetry, number, memory_peaks
 from .llama_cpp import count_prompt as llama_count_prompt, effective_settings as llama_effective_settings, normalize_usage as llama_usage
 from .reasoning import ReasoningEffort, reasoning_kwargs
 from .tool_calls import ToolRequest, ToolCallAccumulator, ToolResponseError, validate_tool_history
@@ -36,15 +36,17 @@ from .benchmarks import EvaluationManager, report_markdown
 from .profiles import enrich_profile, record_loaded_memory
 from .live_output import LiveOutput
 from .archive import ABORTED, list_runs, manage_runs, run_performance
+from .comfyui import release_comfyui, restore_comfyui
+from .chat_api import conversation_router
 
-MODEL_ROOT = Path(os.environ.get('LUMEN_MODEL_ROOT', Path.home() / 'models')).expanduser()
-STATE = Path(os.environ.get('LUMEN_STATE', RUNTIME / 'state'))
-PORT = int(os.environ.get('LUMEN_PORT', '7860'))
-LAN_NETWORK = ipaddress.ip_network(os.environ['LUMEN_LAN_NETWORK'], strict=False) if os.environ.get('LUMEN_LAN_NETWORK') else None
+MODEL_ROOT = Path(os.environ.get('INFLECT_MODEL_ROOT', Path.home() / 'models')).expanduser()
+STATE = Path(os.environ.get('INFLECT_STATE', RUNTIME / 'state'))
+PORT = int(os.environ.get('INFLECT_PORT', '7860'))
+LAN_NETWORK = ipaddress.ip_network(os.environ['INFLECT_LAN_NETWORK'], strict=False) if os.environ.get('INFLECT_LAN_NETWORK') else None
 ALLOWED_HOSTS = {'localhost', '127.0.0.1', 'testserver'} | {
-    host.strip() for host in os.environ.get('LUMEN_ALLOWED_HOSTS', '').split(',') if host.strip()
+    host.strip() for host in os.environ.get('INFLECT_ALLOWED_HOSTS', '').split(',') if host.strip()
 }
-telemetry = Telemetry()
+telemetry = Telemetry(lambda: supervisor.proc.pid if supervisor.proc and supervisor.proc.returncode is None else None)
 
 
 def client_allowed(host):
@@ -105,6 +107,8 @@ class Supervisor:
         self.live_output = LiveOutput()
         self.ready_at = None
         self.memory_recorded_for = None
+        self.load_detail = None
+        self.memory_preparation = None
 
     async def refresh(self):
         self.inventory = await asyncio.to_thread(scan, MODEL_ROOT)
@@ -120,6 +124,7 @@ class Supervisor:
                     effective=self.effective, engine=self.engine, started=self.started,
                     elapsed_seconds=round(time.time() - self.started, 1) if self.started else 0,
                     latest_log=self.logs[-1] if self.logs else None, last_usage=self.last_usage,
+                    load_detail=self.load_detail, memory_preparation=self.memory_preparation,
                     live_output=self.live_output.meta, busy=self.generation_lock.locked() or evaluations.active, benchmark=self.benchmark, evaluation=evaluations.snapshot(),
                     tool_calling={'enabled': bool(self.tool_format), 'format': self.tool_format,
                                   'choices': ['auto', 'none'] if self.tool_format else ['none']})
@@ -144,6 +149,8 @@ class Supervisor:
         self.model = self.settings = self.effective = self.engine = self.started = None
         self.launch_configuration = None
         self.tool_format = None
+        self.load_detail = None
+        self.memory_preparation = None
 
     async def _terminate(self):
         proc = self.proc
@@ -175,13 +182,12 @@ class Supervisor:
             if telemetry.value.get('gpu') is None:
                 raise ValueError('CUDA GPU access is unavailable. See the hardware status and launch from Ubuntu.')
             await self._stop()
-            if psutil.virtual_memory().available < model['bytes'] * settings.cpu_percent / 100 + 16 * 2**30:
-                raise ValueError('Insufficient available RAM for this placement plus 16 GiB headroom.')
             self.model, self.settings, self.engine = model, settings, engine
             self.state, self.error = 'loading', None
             self.logs.clear()
             self.started = time.time()
             self.last_usage = None
+            self.load_detail = 'Checking ComfyUI before loading the model…'
             self.task = asyncio.create_task(self._load())
 
     async def _read_logs(self, proc, log_path):
@@ -203,7 +209,15 @@ class Supervisor:
         return {'Authorization': f'Bearer {self.token}'}
 
     async def _load(self):
+        ready = False
+        def progress(message):
+            self.load_detail = message
+            self.logs.append('INFLECT: ' + message)
         try:
+            self.memory_preparation = await release_comfyui(progress)
+            if psutil.virtual_memory().available < self.model['bytes'] * self.settings.cpu_percent / 100 + 16 * 2**30:
+                raise ValueError('Insufficient available RAM for this placement plus 16 GiB headroom.')
+            progress('Loading model weights and context cache…')
             run_dir = STATE / 'runs' / (time.strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(3))
             run_dir.mkdir(parents=True)
             with socket.socket() as sock:
@@ -246,8 +260,7 @@ class Supervisor:
                                 self.effective = await llama_effective_settings(client, self.url, self.headers, self.settings, requested)
                             else:
                                 self.effective = requested
-                            self.state = 'ready'
-                            self.ready_at = time.time()
+                            ready = True
                             save_json(STATE / 'last-profile.json', self.settings.model_dump())
                             return
                     except (httpx.HTTPError, OSError):
@@ -255,12 +268,33 @@ class Supervisor:
                     await asyncio.sleep(1)
             raise RuntimeError('Startup exceeded 30 minutes. The engine has been stopped; inspect its log.')
         except asyncio.CancelledError:
+            # Free the partially loaded LLM before ComfyUI recreates its CUDA context.
+            await self._terminate()
             raise
         except Exception as exc:
             self.error = str(exc)
-            self.logs.append('LUMEN: ' + self.error)
+            self.logs.append('INFLECT: ' + self.error)
             await self._terminate()
             self.state = 'error'
+        finally:
+            async def restore():
+                try:
+                    await restore_comfyui(self.memory_preparation, progress)
+                except Exception as exc:
+                    if self.memory_preparation:
+                        self.memory_preparation['restore_error'] = str(exc)
+                    warning = 'ComfyUI restart needs attention: ' + str(exc)
+                    self.error = (self.error + ' ' if self.error else '') + warning
+                    progress(warning)
+            restoring = asyncio.create_task(restore())
+            try:
+                await asyncio.shield(restoring)
+            except asyncio.CancelledError:
+                await restoring
+                raise
+            if ready:
+                self.state = 'ready'
+                self.ready_at = time.time()
 
     async def watch(self):
         while True:
@@ -272,12 +306,14 @@ class Supervisor:
                     and self.memory_recorded_for != self.started
                     and not self.generation_lock.locked() and not evaluations.active
                     and not (self.benchmark_task and not self.benchmark_task.done())
+                    and (not telemetry.value.get('model_memory')
+                         or telemetry.value['model_memory']['sampled_at'] >= self.ready_at)
                     and (telemetry.value.get('timestamp') or 0) >= self.ready_at + 3):
                 try:
                     if record_loaded_memory(STATE, self.settings.model_dump(), self.model, telemetry.value):
                         self.memory_recorded_for = self.started
                 except (OSError, sqlite3.Error) as exc:
-                    self.logs.append('LUMEN: Could not save loaded memory measurement: ' + str(exc))
+                    self.logs.append('INFLECT: Could not save loaded memory measurement: ' + str(exc))
             await asyncio.sleep(1)
 
     def check_request(self, messages, max_output=None, reasoning_effort=None, tool_request=None):
@@ -424,7 +460,7 @@ class Supervisor:
                 return max((v for v in values if v is not None), default=None)
             result['hardware_peaks'] = dict(gpu_power_watts=peak('gpu', 'power_watts'),
                 cpu_power_watts=peak('cpu_power', 'watts'),
-                vram_bytes=peak('gpu', 'used_bytes'), ram_bytes=peak('ram', 'used_bytes'), cpu_percent=peak(None, 'cpu_percent'))
+                vram_bytes=peak('gpu', 'used_bytes'), cpu_percent=peak(None, 'cpu_percent'), **memory_peaks(samples))
             self.last_usage = result
             yield {'type': 'complete', **result}
 
@@ -442,7 +478,7 @@ async def lifespan(app):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        raise RuntimeError('Lumen is already running.')
+        raise RuntimeError('Inflect is already running.')
     with db():
         pass
     evaluations = EvaluationManager(STATE, supervisor, telemetry)
@@ -465,7 +501,7 @@ async def lifespan(app):
         lock.close()
 
 
-app = FastAPI(title='Lumen local model workbench', lifespan=lifespan)
+app = FastAPI(title='Inflect local model workbench', lifespan=lifespan)
 
 
 @app.middleware('http')
@@ -478,8 +514,8 @@ async def local_only(request: Request, call_next):
     if not origin_allowed(origin):
         return JSONResponse({'detail': 'Cross-origin access denied.'}, status_code=403)
     if request.method not in ('GET', 'HEAD', 'OPTIONS'):
-        if request.headers.get('x-lumen-local') != '1':
-            return JSONResponse({'detail': 'Missing X-Lumen-Local: 1 header.'}, status_code=403)
+        if request.headers.get('x-inflect-local') != '1':
+            return JSONResponse({'detail': 'Missing X-Inflect-Local: 1 header.'}, status_code=403)
         if int(request.headers.get('content-length', '0')) > 24_000_000:
             return JSONResponse({'detail': 'Request exceeds 24 MB.'}, status_code=413)
     response = await call_next(request)
@@ -845,6 +881,7 @@ class EvaluationRequest(BaseModel):
     suite: Literal['humaneval', 'swebench']
     model_id: str
     budget_minutes: int = Field(30, ge=5, le=30)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class PreparationRequest(BaseModel):
@@ -908,12 +945,12 @@ async def evaluation_preparation_log(suite: Literal['humaneval', 'swebench']):
     path = evaluations.assets / f'{suite}-setup.log'
     if not path.is_file():
         raise HTTPException(404, 'No preparation log is available for this benchmark yet.')
-    return FileResponse(path, media_type='text/plain', filename=f'lumen-{suite}-setup.log')
+    return FileResponse(path, media_type='text/plain', filename=f'inflect-{suite}-setup.log')
 
 
 @app.post('/api/evaluations', status_code=202)
 async def evaluation_start(body: EvaluationRequest):
-    return await evaluations.start(body.suite, body.model_id, body.budget_minutes * 60)
+    return await evaluations.start(body.suite, body.model_id, body.budget_minutes * 60, body.reasoning_effort)
 
 
 @app.post('/api/evaluations/stop')
@@ -930,12 +967,12 @@ async def evaluation_detail(run_id: str):
 @app.get('/api/evaluations/{run_id}/report')
 async def evaluation_report(run_id: str):
     result = evaluations.get(run_id)
-    return PlainTextResponse(report_markdown(result), headers={'Content-Disposition': f'attachment; filename="lumen-{run_id}.md"'})
+    return PlainTextResponse(report_markdown(result), headers={'Content-Disposition': f'attachment; filename="inflect-{run_id}.md"'})
 
 
 @app.get('/api/evaluations/{run_id}/json')
 async def evaluation_json(run_id: str):
-    return JSONResponse(evaluations.get(run_id), headers={'Content-Disposition': f'attachment; filename="lumen-{run_id}.json"'})
+    return JSONResponse(evaluations.get(run_id), headers={'Content-Disposition': f'attachment; filename="inflect-{run_id}.json"'})
 
 
 @app.get('/api/evaluations/{run_id}/archive')
@@ -944,7 +981,7 @@ async def evaluation_archive(run_id: str):
     if result['state'] == 'running':
         raise HTTPException(409, 'Stop or finish this run before downloading its complete archive.')
     path = await asyncio.to_thread(evaluations.archive, run_id)
-    return FileResponse(path, media_type='application/zip', filename=f'lumen-{run_id}.zip')
+    return FileResponse(path, media_type='application/zip', filename=f'inflect-{run_id}.zip')
 
 
 class BenchmarkRequest(BaseModel):
@@ -964,15 +1001,18 @@ async def benchmark(body: BenchmarkRequest | None = None):
         raise ValueError('Load a model and finish the current request before benchmarking.')
     effort = body.reasoning_effort if body and body.reasoning_effort is not None else supervisor.settings.reasoning_effort
     reasoning_kwargs(supervisor.model, effort)
-    run_id = secrets.token_hex(8)
+    run_id, created = secrets.token_hex(8), time.time()
     supervisor.live_output.start(run_id, 'speed', 'Speed test', supervisor.model)
-    supervisor.benchmark = {'id': run_id, 'state': 'running', 'completed': 0, 'total': 3}
+    supervisor.benchmark = {'id': run_id, 'state': 'running', 'created': created,
+                            'elapsed_seconds': 0, 'completed': 0, 'total': 3}
     supervisor.benchmark_task = asyncio.create_task(run_benchmark(effort))
     return supervisor.benchmark
 
 
 async def run_benchmark(effort):
-    result = dict(id=supervisor.benchmark.get('id') or secrets.token_hex(8), created=time.time(), model=supervisor.model,
+    started = time.monotonic()
+    result = dict(id=supervisor.benchmark.get('id') or secrets.token_hex(8),
+                  created=supervisor.benchmark.get('created') or time.time(), model=supervisor.model,
                   settings={**supervisor.settings.model_dump(), 'reasoning_effort': effort},
                   engine=supervisor.engine, effective=supervisor.effective, runs=[], kind='short-prompt',
                   notes='Three unique prompts with 512-token output limits and the profile temperature. Configured capacity preserved. Read cached-token counts; capacity is not a filled-context test.')
@@ -998,6 +1038,7 @@ async def run_benchmark(effort):
             supervisor.live_output.append('status', f"\nGeneration: {metrics.get('tokens_per_second')} tok/s · Prefill: {metrics.get('prompt_tokens_per_second')} tok/s\n")
             result['runs'].append(dict(metrics, output_preview=text[:600]))
             supervisor.benchmark['completed'] = i + 1
+            supervisor.benchmark['elapsed_seconds'] = round(time.monotonic() - started, 2)
         speeds = [r['tokens_per_second'] for r in result['runs'] if r['tokens_per_second'] is not None]
         result['median_tps'] = statistics.median(speeds) if speeds else None
         prompt_speeds = [r['prompt_tokens_per_second'] for r in result['runs'] if r.get('prompt_tokens_per_second') is not None]
@@ -1007,16 +1048,27 @@ async def run_benchmark(effort):
         result['state'] = 'cancelled'
     except Exception as exc:
         result.update(state='cancelled' if supervisor.cancel.is_set() else 'failed', error=str(exc))
+    result['elapsed_seconds'] = round(time.monotonic() - started, 2)
     if result['state'] not in ABORTED:
         with db() as connection:
             connection.execute('INSERT INTO benchmarks VALUES (?, ?, ?)', (result['id'], result['created'], json.dumps(result)))
     supervisor.live_output.finish(result)
-    supervisor.benchmark = {'id': result['id'], 'state': result['state'], 'completed': len(result['runs']), 'total': 3, 'error': result.get('error')}
+    supervisor.benchmark = {'id': result['id'], 'state': result['state'], 'created': result['created'],
+                            'elapsed_seconds': result['elapsed_seconds'], 'completed': len(result['runs']),
+                            'total': 3, 'error': result.get('error')}
+
+
+app.include_router(conversation_router(lambda: STATE, supervisor))
 
 
 DIST = PROJECT / 'frontend/dist'
 if DIST.exists():
     app.mount('/assets', StaticFiles(directory=DIST / 'assets'), name='assets')
+
+
+@app.get('/inflect.svg')
+async def brand_icon():
+    return FileResponse(PROJECT / 'assets/inflect.svg', media_type='image/svg+xml')
 
 
 @app.get('/')

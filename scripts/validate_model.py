@@ -1,4 +1,4 @@
-"""Run reproducible text, vision, or occupied-context checks against Lumen."""
+"""Run reproducible text, vision, or occupied-context checks against Inflect."""
 import argparse
 import base64
 from datetime import datetime, timezone
@@ -14,14 +14,14 @@ URL = 'http://127.0.0.1:7860'
 
 def api(path, body=None):
     request = urllib.request.Request(URL + path, data=json.dumps(body).encode() if body is not None else None,
-        headers={'Content-Type': 'application/json', 'X-Lumen-Local': '1'})
+        headers={'Content-Type': 'application/json', 'X-Inflect-Local': '1'})
     with urllib.request.urlopen(request, timeout=1800) as response:
         return json.load(response)
 
 
 def generate(messages, tokens=128):
     req = urllib.request.Request(URL + '/api/chat', data=json.dumps({'messages': messages, 'max_output': tokens, 'temperature': 0}).encode(),
-        headers={'Content-Type': 'application/json', 'X-Lumen-Local': '1'})
+        headers={'Content-Type': 'application/json', 'X-Inflect-Local': '1'})
     text, reasoning, complete = '', '', None
     with urllib.request.urlopen(req, timeout=1800) as response:
         for line in response:

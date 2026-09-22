@@ -11,11 +11,11 @@ from importlib.metadata import distributions
 from pathlib import Path
 import sys
 
-SEED = 'lumen-coding-v1'
-HUMAN_SELECTION = 'lumen-humaneval-80-v1'
+SEED = 'inflect-coding-v1'
+HUMAN_SELECTION = 'inflect-humaneval-80-v1'
 # Requests' historical tests depend on public HTTP services. Keep the fixed
 # offline subset explicit and versioned; never omit failing upstream tests.
-SWE_SELECTION = 'lumen-swe-offline-v2'
+SWE_SELECTION = 'inflect-swe-offline-v2'
 REPOS = ('pylint-dev/pylint', 'pallets/flask', 'pytest-dev/pytest')
 
 
@@ -37,7 +37,7 @@ def human_data():
     selected = choose(list(get_human_eval_plus().values()), 'task_id', 80)
     problems = {p['task_id']: p for p in selected}
     dataset_hash = get_human_eval_plus_hash()
-    expected = get_groundtruth(problems, dataset_hash + '-lumen-80-v1', [])
+    expected = get_groundtruth(problems, dataset_hash + '-inflect-80-v1', [])
     return problems, expected, dataset_hash
 
 
@@ -92,7 +92,7 @@ def swe_grade(body):
         return dict(passed=False, infrastructure_error='The official grader could not find a complete test report.')
     if not spec.FAIL_TO_PASS:
         return dict(passed=False, infrastructure_error='Task has no required fail-to-pass tests.')
-    prediction = dict(instance_id=spec.instance_id, model_name_or_path='lumen', model_patch=body['patch'])
+    prediction = dict(instance_id=spec.instance_id, model_name_or_path='inflect', model_patch=body['patch'])
     report = get_eval_report(spec, prediction, str(path), include_tests_status=True)[spec.instance_id]
     return dict(passed=report['resolved'], report=report)
 
@@ -118,7 +118,7 @@ def main():
     else:
         raise ValueError('Unknown worker operation')
     # Library diagnostics can precede this line; the host accepts only this record.
-    print('LUMEN_RESULT=' + json.dumps(result))
+    print('INFLECT_RESULT=' + json.dumps(result))
 
 
 if __name__ == '__main__':

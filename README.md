@@ -1,8 +1,26 @@
-# Lumen · local model workbench
+# Inflect · local model workbench
 
-Lumen is a local Ubuntu interface for running large language models with a small set of understandable controls. It ships a qualified **ExLlamaV3 1.5.0 + TabbyAPI** path for EXL3 checkpoints and an optional pinned **llama.cpp b11050 / CUDA 12.8** runtime for GGUF models, including embedded Qwen MTP. The vLLM safetensors adapter still requires separate installation and qualification.
+Inflect is a local Ubuntu interface for running large language models with a small set of understandable controls. It ships a qualified **ExLlamaV3 1.5.0 + TabbyAPI** path for EXL3 checkpoints and an optional pinned **llama.cpp b11050 / CUDA 12.8** runtime for GGUF models, including embedded Qwen MTP. The vLLM safetensors adapter still requires separate installation and qualification.
 
 The interface includes streaming text and image chat, 256K context profiles, Q8/FP16/Q4 KV choices, vision and MTP controls, saved profiles, repeatable benchmarks, and live GPU power, CPU package power, VRAM, RAM, CPU load, prompt-processing speed, decode speed, and first-token time.
+
+
+## Chat workspace
+
+Inflect saves conversations, messages, reasoning, drafts and attachments on this computer in `state/conversations.sqlite3`. Open **Conversation history** (Ctrl+K) to search titles and message content, switch chats, or import a conversation. **New conversation** (Ctrl+Shift+O) starts a separate history. Changing models keeps the conversation open and records the model used for each answer.
+
+- **Edit** and **Retry** create a new branch, preserving the original conversation. **Branch** continues from any message. Stop saves the partial answer. Replies are checkpointed once a second and on completion/disconnection; interrupted checkpoints are recovered after a manager restart.
+- **Conversation options** contains rename (also click the title), chat instructions, JSON export/import, and permanent deletion. Inflect exports include attachment bytes; imports upload files individually so large histories do not depend on a single huge API request. Generic JSON with a `messages` list is also accepted for text conversations.
+- Attach text, source code, HTML, SVG, Markdown, PDFs, PNG/JPEG/WebP/GIF images, and MP3/WAV audio. Files are limited to 12 MB each, 20 per message and 200 per conversation. PDFs support up to 250 pages and 2 million extracted characters. Text and PDF text use either inference engine. GIF images are converted to PNG for vision input. SVG source is sent as text. Images require a loaded vision model; audio playback is supported, but model input requires a transcript because neither installed engine has a qualified audio path. Scanned PDFs need page images or external OCR.
+- Code blocks have copy, download and preview controls. The resizable preview panel supports HTML with inline CSS/JavaScript, SVG, Markdown, source/text, images, paged PDFs and audio. HTML and SVG run in a sandbox with no parent-page access and no external connections. Self-contained files work offline; remote scripts, fonts and images are intentionally blocked. Source and rendered views are available together with expand, restart and download controls.
+- **Maximize chat** expands the workspace across the window. A compact top strip retains GPU/CPU power, VRAM, model RAM, CPU load, prompt speed, decode speed and first-token latency. Model settings open as a drawer; **Restore dashboard** returns to the regular layout.
+
+**Permanent deletion:** there is no chat trash or undo. Deleting removes the conversation, draft, attachments and generated previews from the app. SQLite secure deletion scrubs freed database cells and the database uses delete-mode journals, not a retained WAL. If the conversation contains an assistant reply and an engine is loaded, Inflect unloads its owned engine process to release prompt/KV caches. The dialog explains this before deletion. Other active requests must finish first. Open app windows receive a deletion notification. Independent branches, downloaded exports, external backups and SSD-level forensic remnants are outside this guarantee.
+
+Chats do not use browser local storage or IndexedDB for their content. Only the selected conversation ID is remembered in the browser. Revision checks prevent one window from silently overwriting another. The same qualified inference pipeline serves the chat UI and the compatible API for ExLlamaV3/TabbyAPI and llama.cpp.
+
+Validation and instructions for repeating the isolated UI checks are in [the chat workspace report](validation/INFLECT_CHAT_WORKSPACE_20260922.md).
+
 
 ## Requirements
 
@@ -33,7 +51,7 @@ nvidia-smi
 
 Do not continue until that command displays the GPU without an error.
 
-### 2. Clone Lumen
+### 2. Clone Inflect
 
 On a minimal installation, install Git first:
 
@@ -69,31 +87,31 @@ Setup performs these steps:
 5. Checks out the pinned TabbyAPI revision and applies the included status-reporting patch.
 6. Runs a real CUDA calculation.
 7. Stores this machine's project and model paths in a private local configuration file.
-8. Adds **Lumen** to the application menu.
+8. Adds **Inflect** to the application menu.
 
 No model is downloaded or moved.
 
-### 5. Start Lumen
+### 5. Start Inflect
 
-Open **Lumen** from Ubuntu's application menu, or run:
+Open **Inflect** from Ubuntu's application menu, or run:
 
 ```bash
 ./launch.sh
 ```
 
-The interface opens at `http://127.0.0.1:7860`. Lumen starts in computer-only mode. Its inference engine always remains bound to loopback.
+The interface opens at `http://127.0.0.1:7860`. Inflect starts in computer-only mode. Its inference engine always remains bound to loopback.
 
 ## Optional private-LAN access
 
-To let phones, tablets, or other computers on the directly connected private network open Lumen:
+To let phones, tablets, or other computers on the directly connected private network open Inflect:
 
 ```bash
 python3 scripts/configure-access.py --lan
 ```
 
-Quit and reopen Lumen. The command prints the private URL to use on other devices. LAN mode binds the GUI to the detected private IPv4 address and accepts clients only from that exact subnet. Requests from public internet addresses are rejected even if a router is accidentally configured to forward the port. No inference-engine port or temporary engine key is exposed.
+Quit and reopen Inflect. The command prints the private URL to use on other devices. LAN mode binds the GUI to the detected private IPv4 address and accepts clients only from that exact subnet. Requests from public internet addresses are rejected even if a router is accidentally configured to forward the port. No inference-engine port or temporary engine key is exposed.
 
-Every trusted device on that subnet can use the GUI; Lumen does not provide individual user accounts. Avoid LAN mode on guest, hotel, university, or other untrusted shared networks.
+Every trusted device on that subnet can use the GUI; Inflect does not provide individual user accounts. Avoid LAN mode on guest, hotel, university, or other untrusted shared networks.
 
 Return to computer-only access with:
 
@@ -101,7 +119,7 @@ Return to computer-only access with:
 python3 scripts/configure-access.py --local
 ```
 
-Quit and reopen Lumen again to apply the change. A changing DHCP address may also require rerunning `--lan`.
+Quit and reopen Inflect again to apply the change. A changing DHCP address may also require rerunning `--lan`.
 
 ## External model drive
 
@@ -131,7 +149,7 @@ If the project or models live on a removable drive and you want the launcher to 
   --mount-device "/dev/disk/by-uuid/YOUR-UUID"
 ```
 
-The device path is written only to `~/.config/lumen/config.json`; it is never added to Git.
+The device path is written only to `~/.config/inflect/config.json`; it is never added to Git.
 
 ## Using the workbench
 
@@ -148,9 +166,19 @@ Profile cards show the full model variant and quant, generation and prefill spee
 
 Memory is sampled once the loaded engine has been ready for at least three seconds and inference/benchmarks are idle. It records **total system VRAM/RAM usage**, including other applications, rather than claiming a model-only allocation. The timestamp is available on hover. Values persist in the results database and are shared by copies with identical loading settings. Changing context, KV, placement, or other loading settings requires a new measurement; sampling-only changes retain it.
 
+The RAM dashboard shows three figures: **model RAM** as the headline, **total usable RAM**, and **available RAM (estimated) while keeping the loaded model resident**. The model measurement includes the engine and workers, counting shared pages proportionally (PSS). Dashboard headroom conservatively subtracts resident file-backed model PSS from the system available-memory estimate, clamped to zero and to capacity minus model residency. Anonymous/shared allocations are already excluded by system availability and are not subtracted twice. Locked/shared file pages and kernel reserves can make this estimate conservative; it is not a guarantee that another model will fit. Missing or inconsistent measurements show a dash. With no model loaded, the estimate uses system availability. The dashboard and its info panel use plain language; raw cache categories are not displayed. Profile RAM sorting/filtering remains based on total occupied physical RAM including cache (`MemTotal − MemFree`).
+
+Backend load admission still uses Linux's `MemAvailable` estimate: it includes reclaimable cache and is not completely free memory. Saved readings from before this correction cannot be reconstructed; their RAM value is excluded from comparisons and marked for remeasurement on the next load. New response/benchmark peaks include total RAM, cache, non-cache and model residency with explicit accounting metadata; component peaks are independent maxima and must not be added together. Historical benchmark exports retain their original numbers, labelled `legacy_total_minus_available`; new system measurements use `physical_including_cache_v1`.
+
 Profile speed uses matching effective engine and generation settings. Results for the same model with different settings appear separately inside the expanded profile. Speed tests use three short prompts and 512-token output limits; their numbers are not long-context throughput guarantees.
 
-The conversation follows new output automatically. Scrolling away pauses tail following; **Jump to latest** resumes it. Closing the browser tab leaves the local server running. **Unload model** frees model RAM and VRAM. **Quit Lumen** stops the server.
+The conversation follows new output automatically. Scrolling away pauses tail following; **Jump to latest** resumes it. Closing the browser tab leaves the local server running. **Unload model** frees model RAM and VRAM. **Quit Inflect** stops the server.
+
+Before every model load or reload, Inflect releases the previous LLM and prepares ComfyUI. For a Docker deployment, set `comfyui_container` in `~/.config/inflect/config.json` (or `INFLECT_COMFYUI_CONTAINER`) to the explicit ComfyUI backend container name. Inflect waits for its queue to become idle, stops that container, confirms it has stopped, then launches the LLM. Once loading finishes, fails, or is cancelled, Inflect restarts ComfyUI if it was running before and waits for its API to return. An already stopped ComfyUI stays stopped. Docker commands use the inspected container ID, have bounded timeouts, and cancellation waits for an in-flight stop before restoring the service. No workflow files or saved outputs are deleted. A busy queue is preserved; it times out with a specific message instead of being cancelled. Avoid submitting new ComfyUI work during a model switch.
+
+The local installation uses `pi-ubuntu-comfy`. This managed lifecycle replaces the allocator-zero check: ComfyUI can retain small CUDA allocations after a successful `/free`, so zero bytes is not a reliable completion requirement. The load banner shows stop, model load, and restart stages. ComfyUI's empty backend may allocate its CUDA context again after restart; a new image workflow can also use VRAM again.
+
+The ComfyUI API address defaults to `http://127.0.0.1:8188`; override it with `INFLECT_COMFYUI_URL` using a loopback address. Without an explicitly configured container, the portable API-only mode still requests `/free` and checks the queue/allocator. It cannot conclusively confirm release when the allocator retains memory; its error advises managed container cleanup rather than incorrectly blaming queued jobs. A refused connection in API-only mode is skipped. Managed mode requires Docker CLI access for the Inflect user and never guesses which container to stop.
 
 ## Coding benchmarks
 
@@ -159,16 +187,16 @@ Open **Benchmarks → Run a benchmark**, choose a test, and prepare its environm
 | Mode | What it measures | Fixed local subset |
 |---|---|---|
 | Quick coding | Writing correct Python functions, checked with the original and extended [EvalPlus](https://github.com/evalplus/evalplus) tests | Short: 20; Medium: 40; Long: 80 HumanEval+ problems |
-| Repository coding | Inspecting and fixing real codebases with Lumen's bash agent, then grading in a fresh checkout with the official [SWE-bench](https://github.com/SWE-bench/SWE-bench) harness | Short: Pylint; Medium: Pylint + Flask; Long: Pylint + Flask + pytest |
+| Repository coding | Inspecting and fixing real codebases with Inflect's bash agent, then grading in a fresh checkout with the official [SWE-bench](https://github.com/SWE-bench/SWE-bench) harness | Short: Pylint; Medium: Pylint + Flask; Long: Pylint + Flask + pytest |
 | Speed test | Prompt-processing and decode throughput, without grading answers | The existing three prompts |
 
-The coding modes are practical alternatives to a lengthy full-suite run. They are **not DeepSWE or LiveBench implementations** and their scores are not full-suite or official leaderboard results. HumanEval+ uses deterministic nested prefixes: Medium contains all 20 Short problems plus 20 more, and Long contains all 40 Medium problems plus 40 more. Repository coding also uses deterministic prefixes: Short runs Pylint, Medium adds Flask, and Long adds pytest. Both modes have no model-generation, per-task, or whole-run wall-clock cutoff; each answer may finish naturally. HumanEval+'s isolated grader retains a 120-second safety ceiling for generated code that hangs. Repository shell commands retain a 45-second ceiling and its isolated grader retains a 150-second ceiling. The repository runner is Lumen's own JSON/bash agent, with one attempt and at most 40 turns. The archive and copied report show when the agent ran out of actions or produced no patch. Preset task IDs and subset fingerprints are recorded; compare scores only across the same subset and conditions. Vision remains in the recorded configuration, but these are text-only coding tests, not a vision evaluation.
+The coding modes are practical alternatives to a lengthy full-suite run. They are **not DeepSWE or LiveBench implementations** and their scores are not full-suite or official leaderboard results. HumanEval+ uses deterministic nested prefixes: Medium contains all 20 Short problems plus 20 more, and Long contains all 40 Medium problems plus 40 more. Repository coding also uses deterministic prefixes: Short runs Pylint, Medium adds Flask, and Long adds pytest. Both modes have no model-generation, per-task, or whole-run wall-clock cutoff; each answer may finish naturally. HumanEval+'s isolated grader retains a 120-second safety ceiling for generated code that hangs. Repository shell commands retain a 45-second ceiling and its isolated grader retains a 150-second ceiling. The repository runner is Inflect's own JSON/bash agent, with one attempt and at most 40 turns. The archive and copied report show when the agent ran out of actions or produced no patch. Preset task IDs and subset fingerprints are recorded; compare scores only across the same subset and conditions. Vision remains in the recorded configuration, but these are text-only coding tests, not a vision evaluation.
 
 **Live output:** coding and speed benchmarks open a floating terminal with streamed answers, thinking, agent commands, command/test output, and progress. Scroll up or disable **Follow tail** to pause scrolling; **Jump to latest** resumes it. Expand to full screen or minimize it while working elsewhere. The tail retains up to 1,048,576 characters in memory and is discarded for aborted runs. Completed coding runs keep full artifacts in their archive. A completion popup names the model, shows scores when available and both speeds, and opens the full results.
 
 SWE-bench issues are individually resolved or unresolved, without partial credit. A fully graded Short run has one issue (0% or 100%); Medium has two (0%, 50%, or 100%); Long has three (0%, 33.3%, 66.7%, or 100%).
 
-**Reading results:** passed tasks satisfy the upstream tests; failed tests are distinct from runner errors, grader safety timeouts, and unattempted tasks. Aggregate accuracy appears only when every selected task has a grading result. Partial runs show passed/selected and grading coverage. A small subset is a quick comparison, not a precise ranking. Generation uses the loaded maximum output, temperature, and reasoning choice. Output limits include reasoning. Sampling defaults other than temperature remain the installed engine's defaults, and results can vary across repeated runs.
+**Reading results:** passed tasks satisfy the upstream tests; failed tests are distinct from runner errors, grader safety timeouts, and unattempted tasks. Aggregate accuracy appears only when every selected task has a grading result. Partial runs show passed/selected and grading coverage. A small subset is a quick comparison, not a precise ranking. Generation uses the loaded maximum output and temperature, plus the **Thinking for this benchmark** choice. That choice is frozen for the run and recorded in its results. Output limits include reasoning. Sampling defaults other than temperature remain the installed engine's defaults, and results can vary across repeated runs.
 
 **Archive and sharing:** every run records the model name, path, quantization, model ID, file metadata and available download receipt; all settings including context, KV precision, MTP and draft length, vision, reasoning, output cap, temperature, CPU placement/threads, and chunk size; effective and requested engine configuration; runtime packages/source fingerprints; hardware; dataset revision, immutable Docker image IDs, task IDs, prompts, limits, timings, and available generation metrics. File metadata fingerprints are not full weight checksums; small model configuration/template files are hashed. Saved-profile names are captured when their configuration matches exactly.
 
@@ -190,17 +218,17 @@ Install Docker on an existing Ubuntu machine:
 sudo /bin/bash scripts/install-benchmark-docker.sh --user "$(id -un)"
 ```
 
-The installer enables Docker at startup and adds the named user to the Docker group, which grants root-equivalent control. Lumen uses `sg` to activate that already-granted membership in an older login session; Ubuntu 26.04's missing login utility is installed when necessary. New installations can use `./scripts/setup-ubuntu.sh --model-dir "/path/to/models" --with-benchmarks`.
+The installer enables Docker at startup and adds the named user to the Docker group, which grants root-equivalent control. Inflect uses `sg` to activate that already-granted membership in an older login session; Ubuntu 26.04's missing login utility is installed when necessary. New installations can use `./scripts/setup-ubuntu.sh --model-dir "/path/to/models" --with-benchmarks`.
 
-In Lumen, click **Prepare benchmark** for each coding mode. The first build/pulls can take several minutes and several GB of disk space. Preparation is cancellable, and completed Docker layers are reused on retry. A failed environment check is shown as a setup error, never a model failure. EvalPlus 0.3.1 and SWE-bench 3.0.15 are isolated in the evaluator image, and its actual installed dependencies and image ID are archived. Tasks are selected deterministically using `lumen-coding-v1`; the repository subset is versioned as `lumen-swe-offline-v2`, replacing Requests (whose historical tests require public HTTP services) with Pylint while preserving the Flask and pytest selections. All upstream required and regression tests remain enforced. Setup failures include a concise explanation and a downloadable full log. The resolved dataset revision is pinned in the cached manifest. Avoid clearing Docker images needed by a prepared subset; if an image is removed, rerun preparation.
+In Inflect, click **Prepare benchmark** for each coding mode. The first build/pulls can take several minutes and several GB of disk space. Preparation is cancellable, and completed Docker layers are reused on retry. A failed environment check is shown as a setup error, never a model failure. EvalPlus 0.3.1 and SWE-bench 3.0.15 are isolated in the evaluator image, and its actual installed dependencies and image ID are archived. Tasks are selected deterministically using `inflect-coding-v1`; the repository subset is versioned as `inflect-swe-offline-v2`, replacing Requests (whose historical tests require public HTTP services) with Pylint while preserving the Flask and pytest selections. All upstream required and regression tests remain enforced. Setup failures include a concise explanation and a downloadable full log. The resolved dataset revision is pinned in the cached manifest. Avoid clearing Docker images needed by a prepared subset; if an image is removed, rerun preparation.
 
 The **Thinking** selector above the message box applies to the next message, even after loading the model. **Model default** leaves reasoning to the checkpoint's chat template; **Off** and native effort levels appear only when identified in that template. The current Qwen3.8 Flash Next template offers Low, Medium and Extra high (default); both DeepSeek V4 Flash templates offer Low (default), High and Max. Other checkpoints may offer different choices. Effort levels are model instructions, not fixed token budgets.
 
-There is no separate 1K thinking cap. **Maximum output** limits thinking and the final answer together, so increase it for longer reasoning. An output-limit notice explains when generation stops at that limit. Saved profiles include the selected effort; older profiles retain Off if thinking was disabled, while previously enabled thinking becomes Model default. Changing effort does not change GPU placement or reload weights, although a changed prompt prefix may reduce prompt-cache reuse.
+There is no separate 1K thinking cap. **Maximum output** limits thinking and the final answer together, so increase it for longer reasoning. An output-limit notice explains when generation stops at that limit. **Profile thinking preference** saves the initial choice for chat and benchmarks; their own selectors apply independently without changing the saved profile. Loading keeps all native modes available and does not freeze a thinking level into the engine. New profiles use Model default, with the template's default level displayed when detectable. Older profiles retain Off if thinking was disabled, while previously enabled thinking becomes Model default. Changing effort does not change GPU placement or reload weights, although a changed prompt prefix may reduce prompt-cache reuse. Models with only an on/off switch expose that switch; models without detected controls expose only Model default.
 
 **Decode speed includes thinking tokens**, answer tokens and tool-call output. The engine counts generated token IDs before splitting the response into channels; prompt processing is separate. The pinned ExLlamaV3 1.5.0 wheel has a cumulative-counter bug after multiple output requeues: earlier tokens are omitted while elapsed generation time is retained. Setup applies `patches/exl3-cumulative-output-tokens.patch` to the installed Python module, correcting counts and reported speed for long responses without changing inference settings or token generation. See [the accounting investigation](validation/GENERATION_ACCOUNTING.md).
 
-API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, or `/v1/chat/completions`. Use `default`, `off` (or OpenAI's `none` alias on the `/v1` route), or a native level listed by the model's `reasoning.options` in `/api/library`. Omitting it uses the loaded profile's saved choice. Unsupported levels are rejected; the same template variables are used for token counting and generation. llama.cpp supports exact advance counting for text and tool conversations; image token usage is reported after generation. vLLM remains unqualified. Engine template controls are documented by [vLLM](https://docs.vllm.ai/en/latest/features/reasoning_outputs/) and [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/b11050/tools/server/README.md).
+API clients can send `reasoning_effort` with `/api/chat`, `/api/token-count`, `/api/evaluations`, `/api/benchmark`, or `/v1/chat/completions`. Use `default`, `off` (or OpenAI's `none` alias on the `/v1` route), or a native level listed by the model's `reasoning.options` in `/api/library`. Omitting it uses the loaded profile's saved choice. Unsupported levels are rejected; the same template variables are used for token counting and generation. llama.cpp supports exact advance counting for text and tool conversations; image token usage is reported after generation. vLLM remains unqualified. Engine template controls are documented by [vLLM](https://docs.vllm.ai/en/latest/features/reasoning_outputs/) and [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/b11050/tools/server/README.md).
 
 ## Model and engine support
 
@@ -220,11 +248,13 @@ On an existing installation, run:
 python3 scripts/install-llama.py
 ```
 
-Use `--runtime-dir PATH` for a custom runtime directory, or pass `--with-llama` to `scripts/setup-ubuntu.sh` on a fresh installation. The installer uses SHA-256-pinned official Linux x86_64 CUDA 12.8 packages and private CUDA libraries; it needs no system CUDA toolkit or driver changes. Allow 4 GiB free for installation. Restart Lumen after upgrading its application code. A custom executable can be selected with `LUMEN_GGUF_SERVER`.
+Use `--runtime-dir PATH` for a custom runtime directory, or pass `--with-llama` to `scripts/setup-ubuntu.sh` on a fresh installation. The installer uses SHA-256-pinned official Linux x86_64 CUDA 12.8 packages and private CUDA libraries; it needs no system CUDA toolkit or driver changes. Allow 4 GiB free for installation. Restart Inflect after upgrading its application code. A custom executable can be selected with `INFLECT_GGUF_SERVER`.
 
 Choose **more local variants** in the library or search for a model to see GGUF files. Auto selects llama.cpp for them. Saved profiles retain context, cache precision, prediction mode and draft length, CPU placement, threads, prompt chunk size, sampling temperature, and thinking choice. The default GGUF context is 32K; larger contexts require separate memory and occupied-context testing. The engine must allocate exactly the requested capacity; automatic context shrinking and history shifting are disabled.
 
 For MoE models, **Fine-tune → CPU placement → Experts** keeps attention on the GPU and moves expert weights from the selected percentage of layers into RAM. **Whole layers** also moves attention and other layer work. Zero CPU share requests full GPU offload. For the 35B Q6_K_P model on a 32 GiB card, the initial setting uses 10% expert-layer offload to leave room for cache and vision; dense 27B profiles start with full GPU offload.
+
+Qwen Flash Next checkpoints can include a large PLE n-gram embedding table. Inflect keeps that table in system RAM by default to avoid per-token storage reads; this can consume tens of GiB. **Fine-tune → PLE n-gram table** can instead stream lookup rows from model storage. ExLlamaV3 maps this choice to `ngram_ram`; llama.cpp maps it to `--lazy-mode off` for RAM residency or `--lazy-mode on` for storage streaming. In llama.cpp, lazy mode applies to any other eligible lazy tensors as well.
 
 **Prediction acceleration** enables llama.cpp's native `draft-mtp` when a supported GGUF declares embedded MTP weights. Both Qwen3.8 27B Q4_K_P and Q6_K checkpoints include them. Draft length defaults to two; the server verifies speculative decoding is active before reporting readiness, and records accepted/rejected draft counts with each response. GGUF metadata, rather than the filename, determines MTP availability. The existing HauhauCS Qwen3.6 35B Aggressive Q6_K_P has no MTP weights and runs with prediction off. No checkpoint is replaced or downloaded by engine setup. HauhauCS's separate FastMTP sidecar and patched runtime are not part of this embedded-MTP integration.
 
@@ -232,13 +262,13 @@ Qwen thinking modes and structured tool calls use the checkpoint's native Jinja 
 
 ## OpenAI-compatible tools
 
-Clients connect to Lumen's `/v1` base URL and must send `X-Lumen-Local: 1` on POST requests. No client API key is needed. Query `/v1/models` for the loaded model ID. The internal engine remains authenticated and bound to loopback.
+Clients connect to Inflect's `/v1` base URL and must send `X-Inflect-Local: 1` on POST requests. No client API key is needed. Query `/v1/models` for the loaded model ID. The internal engine remains authenticated and bound to loopback.
 
-For ExLlamaV3 Qwen3.8 Flash Next, Lumen selects TabbyAPI's `qwen3_coder` parser only when the checkpoint architecture and selected chat template match its syntax. For supported Qwen GGUF models, llama.cpp handles parsing through the embedded Jinja template. `/api/status` reports the active `tool_calling` capability. Other model/engine combinations retain ordinary chat; requests offering tools are explicitly rejected until a compatible parser is configured.
+For ExLlamaV3 Qwen3.8 Flash Next, Inflect selects TabbyAPI's `qwen3_coder` parser only when the checkpoint architecture and selected chat template match its syntax. For supported Qwen GGUF models, llama.cpp handles parsing through the embedded Jinja template. `/api/status` reports the active `tool_calling` capability. Other model/engine combinations retain ordinary chat; requests offering tools are explicitly rejected until a compatible parser is configured.
 
-The pinned Tabby runtime includes `patches/tabby-qwen-tool-schema.patch`. It passes tool schemas to the native Qwen parser, preserves explicitly declared string parameters verbatim, and accepts `True`/`False` only for explicitly boolean parameters. Duplicate parameters are rejected and output-limit termination is preserved, so truncated calls cannot be reported as completed calls. Final arguments must still pass Lumen's JSON Schema validation.
+The pinned Tabby runtime includes `patches/tabby-qwen-tool-schema.patch`. It passes tool schemas to the native Qwen parser, preserves explicitly declared string parameters verbatim, and accepts `True`/`False` only for explicitly boolean parameters. Duplicate parameters are rejected and output-limit termination is preserved, so truncated calls cannot be reported as completed calls. Final arguments must still pass Inflect's JSON Schema validation.
 
-`tools` reach the native chat template and token counter. Structured calls retain IDs, names and JSON arguments in both response modes. Streaming calls include indexes; calls are emitted after the engine finishes parsing and Lumen validates them, so arguments may arrive as one complete fragment. Lumen does not execute tools. The client supplies assistant `tool_calls` followed by `role: "tool"` results with matching `tool_call_id` values; multiple results may arrive in a different order.
+`tools` reach the native chat template and token counter. Structured calls retain IDs, names and JSON arguments in both response modes. Streaming calls include indexes; calls are emitted after the engine finishes parsing and Inflect validates them, so arguments may arrive as one complete fragment. Inflect does not execute tools. The client supplies assistant `tool_calls` followed by `role: "tool"` results with matching `tool_call_id` values; multiple results may arrive in a different order.
 
 | Tool setting | Behavior |
 |---|---|
@@ -248,11 +278,11 @@ The pinned Tabby runtime includes `patches/tabby-qwen-tool-schema.patch`. It pas
 | `parallel_tool_calls: false` with active tools | HTTP 422: a single-call constraint is not supported |
 | `strict: true` | HTTP 422: constrained tool generation is not supported; ordinary tool arguments are still schema-validated after generation |
 
-Malformed, truncated, unknown or schema-invalid engine calls fail instead of becoming executable calls. Lumen never parses tool-looking prose itself. Invalid tool history and unsupported reasoning/tool options are rejected before opening a response stream.
+Malformed, truncated, unknown or schema-invalid engine calls fail instead of becoming executable calls. Inflect never parses tool-looking prose itself. Invalid tool history and unsupported reasoning/tool options are rejected before opening a response stream.
 
 Qwen3.8 supports `reasoning_effort` values `default`, `off`, `low`, `medium`, and `xhigh`. `default` uses the checkpoint default, currently `xhigh`; the API also accepts `none` as an alias for `off`, and `on` enables the checkpoint's default thinking level. `minimal`, `high`, and `max` are rejected for this checkpoint even though other models may support them. Omitting the field uses the loaded profile's choice. Reasoning is returned separately in `reasoning_content`.
 
-After updating an existing installation, rerun the setup script with your existing model/runtime locations; it installs manager dependencies and applies the idempotent Tabby patches. Wait for active generation to finish before restarting Lumen and reloading the model to activate its native parser. Profiles need no migration. To exercise the complete API without executing real tools:
+After updating an existing installation, rerun the setup script with your existing model/runtime locations; it installs manager dependencies and applies the idempotent Tabby patches. Wait for active generation to finish before restarting Inflect and reloading the model to activate its native parser. Profiles need no migration. To exercise the complete API without executing real tools:
 
 ```bash
 python3 scripts/verify_tool_calls.py --url http://YOUR_PRIVATE_LAN_IP:7860 --output validation/tool-calling-live.json
@@ -266,9 +296,9 @@ This checks schema visibility, streaming and non-streaming calls, reasoning off/
 |---|---|
 | Source checkout and compiled interface | Wherever this repository is cloned |
 | Manager, Python, ExLlamaV3, PyTorch, TabbyAPI, caches | `~/.local/share/linux-llm-loader/` |
-| Private machine configuration | `~/.config/lumen/config.json` |
+| Private machine configuration | `~/.config/inflect/config.json` |
 | Profiles, benchmark history, logs, temporary engine keys | `~/.local/share/linux-llm-loader/state/` |
-| Desktop shortcut | `~/.local/share/applications/lumen.desktop` |
+| Desktop shortcut | `~/.local/share/applications/inflect.desktop` |
 | Model files | The directory supplied with `--model-dir` |
 
 Machine configuration, logs, profiles, benchmark results, CUDA reports, model files, credentials, `.env` files, and private keys are excluded from Git. Internal engine keys are generated for each run, stored with owner-only permissions, and removed from displayed logs. Chat content remains in browser memory and is cleared when the page reloads.
@@ -285,7 +315,7 @@ Useful options:
 ./scripts/setup-ubuntu.sh --model-dir "/path/to/models" --no-desktop
 ```
 
-The launcher also accepts these environment overrides: `LUMEN_PROJECT`, `LUMEN_RUNTIME`, `LUMEN_MODEL_ROOT`, `LUMEN_PORT`, `LUMEN_LISTEN_HOST`, `LUMEN_LAN_NETWORK`, `LUMEN_PUBLIC_URL`, `LUMEN_MOUNT_DEVICE`, `LUMEN_STATE`, `LUMEN_TABBY`, and `LUMEN_GGUF_SERVER`.
+The launcher also accepts these environment overrides: `INFLECT_PROJECT`, `INFLECT_RUNTIME`, `INFLECT_MODEL_ROOT`, `INFLECT_PORT`, `INFLECT_LISTEN_HOST`, `INFLECT_LAN_NETWORK`, `INFLECT_PUBLIC_URL`, `INFLECT_MOUNT_DEVICE`, `INFLECT_STATE`, `INFLECT_TABBY`, and `INFLECT_GGUF_SERVER`.
 
 ## Troubleshooting
 
@@ -294,9 +324,9 @@ The launcher also accepts these environment overrides: `LUMEN_PROJECT`, `LUMEN_R
 - **Model loading fails:** open **Engine log**. Common causes are an incomplete checkpoint, incompatible settings, insufficient RAM, or insufficient VRAM.
 - **First response is slow:** GPU kernels can compile on first use. Compare sustained performance over several requests.
 - **External drive moved:** rerun setup with the new `--model-dir` and optional `--mount-device` values.
-- **Port 7860 is occupied:** stop the other service or set a different `LUMEN_PORT` before launching.
-- **LAN URL stopped working:** the private DHCP address probably changed; rerun `python3 scripts/configure-access.py --lan` and restart Lumen.
-- **Full disk:** the private runtime uses about 10 GiB before caches. Models are stored separately and are not deleted by Lumen.
+- **Port 7860 is occupied:** stop the other service or set a different `INFLECT_PORT` before launching.
+- **LAN URL stopped working:** the private DHCP address probably changed; rerun `python3 scripts/configure-access.py --lan` and restart Inflect.
+- **Full disk:** the private runtime uses about 10 GiB before caches. Models are stored separately and are not deleted by Inflect.
 
 ## Validation and development
 
@@ -315,4 +345,4 @@ pnpm exec tsc -b
 pnpm exec vite build --config vite.config.js
 ```
 
-After backend changes, quit and reopen Lumen. After frontend-only changes, rebuild and refresh the browser.
+After backend changes, quit and reopen Inflect. After frontend-only changes, rebuild and refresh the browser.

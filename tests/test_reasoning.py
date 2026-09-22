@@ -44,6 +44,24 @@ def test_unknown_and_toggle_only_templates_do_not_advertise_invented_levels():
         reasoning_kwargs({'reasoning': inspect_reasoning(QWEN_TEMPLATE)}, 'high')
 
 
+@pytest.mark.parametrize('template,options,default,off', [
+    ("{% if enable_thinking %}{% if reasoning_effort == 'high' %}{% elif reasoning_effort == 'max' %}{% endif %}{% endif %}",
+     ['default', 'off', 'high', 'max'], None, {'enable_thinking': False}),
+    ("{% set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else 'max' %}",
+     ['default', 'low', 'high', 'max'], 'max', None),
+    ("{% set reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort is not none else 'none' %}{% if reasoning_effort not in ['none', 'high'] %}{% endif %}",
+     ['default', 'off', 'high'], 'off', {'reasoning_effort': 'none'}),
+])
+def test_native_comparisons_fallbacks_and_disabled_values(template, options, default, off):
+    capabilities = inspect_reasoning(template)
+    model = {'reasoning': capabilities}
+    assert capabilities['options'] == options
+    assert capabilities['default_effort'] == default
+    assert reasoning_kwargs(model, 'default') == {}
+    if off is not None:
+        assert reasoning_kwargs(model, 'off') == off
+
+
 def test_template_selection_matches_tabby_precedence(tmp_path):
     (tmp_path / 'tokenizer_config.json').write_text(json.dumps({'chat_template': QWEN_TEMPLATE}))
     assert native_reasoning(tmp_path, True)['default_effort'] == 'xhigh'
@@ -133,7 +151,7 @@ def test_openai_route_forwards_effort(stream):
     calls = []
     with patch.object(server, 'supervisor', supervisor), patch.object(server.httpx, 'AsyncClient', side_effect=engine_client(calls)):
         client = TestClient(server.app)
-        response = client.post('/v1/chat/completions', headers={'X-Lumen-Local': '1'},
+        response = client.post('/v1/chat/completions', headers={'X-Inflect-Local': '1'},
                                json={'messages': [{'role': 'user', 'content': 'Test'}], 'reasoning_effort': 'medium', 'stream': stream})
     assert response.status_code == 200
     assert calls[-1][1]['chat_template_kwargs'] == {'enable_thinking': True, 'reasoning_effort': 'medium'}
@@ -145,7 +163,7 @@ def test_chat_and_token_count_use_the_same_requested_effort():
     with patch.object(server, 'supervisor', supervisor), patch.object(server.httpx, 'AsyncClient', side_effect=engine_client(calls)):
         client = TestClient(server.app)
         for route in ['/api/token-count', '/api/chat']:
-            response = client.post(route, headers={'X-Lumen-Local': '1'}, json={
+            response = client.post(route, headers={'X-Inflect-Local': '1'}, json={
                 'messages': [{'role': 'user', 'content': 'Test'}], 'reasoning_effort': 'xhigh'})
             assert response.status_code == 200
     assert all(body.get('chat_template_kwargs') == {'enable_thinking': True, 'reasoning_effort': 'xhigh'} for _, body in calls)

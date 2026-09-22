@@ -17,11 +17,24 @@ def inspect_reasoning(template):
     for name in aliases:
         for group in re.findall(r'\b' + re.escape(name) + r'\s+(?:not\s+)?in\s*[\[(]([^\])]+)[\])]', statements):
             levels.update(re.findall(r"['\"](\w+)['\"]", group))
+        levels.update(re.findall(r'\b' + re.escape(name) + r"\s*==\s*['\"](\w+)['\"]", statements))
+        # Some templates normalize an omitted/unsupported effort with an inline
+        # conditional (GLM: else 'max', Mistral: else 'none').
+        for assignment in re.findall(r'\bset\s+' + re.escape(name) + r'\s*=([^\n]+)', statements):
+            levels.update(re.findall(r"\belse\s+['\"](\w+)['\"]", assignment))
+    off_value = 'none' if 'none' in levels else 'off' if 'off' in levels else None
     levels = [level for level in LEVELS if level in levels]
     default = re.search(r"\breasoning_effort\s*\|\s*default\(\s*['\"](\w+)['\"]", statements)
+    default_effort = default[1] if default else None
+    if default_effort is None:
+        fallback = re.search(r"\bset\s+\w+\s*=\s*reasoning_effort\s+if\b[^\n]*?\belse\s+['\"](\w+)['\"]", statements)
+        default_effort = fallback[1] if fallback else None
+    if default_effort in ('none', 'off'):
+        default_effort = 'off'
     return {'toggle': toggle, 'levels': levels,
-            'default_effort': default[1] if default and default[1] in levels else None,
-            'options': ['default'] + (['off'] if toggle else []) + (levels or (['on'] if toggle else []))}
+            'off_value': off_value,
+            'default_effort': default_effort if default_effort in [*levels, 'off'] else None,
+            'options': ['default'] + (['off'] if toggle or off_value else []) + (levels or (['on'] if toggle else []))}
 
 
 def native_template(path, exl3=False):
@@ -62,5 +75,6 @@ def reasoning_kwargs(model, effort):
     if effort not in capabilities['options']:
         raise ValueError('This checkpoint does not support that reasoning level. Choose Model default or one of its listed levels.')
     if effort == 'off':
-        return {'enable_thinking': False}
+        return ({'enable_thinking': False} if capabilities['toggle'] else
+                {'reasoning_effort': capabilities['off_value']})
     return {**({'enable_thinking': True} if capabilities['toggle'] else {}), 'reasoning_effort': effort}

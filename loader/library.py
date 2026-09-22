@@ -67,7 +67,7 @@ def gguf_metadata(path):
         result = {}
         for _ in range(count):
             key = string()
-            keep = key in ('general.architecture', 'general.name', 'general.type', 'split.count', 'split.no', 'tokenizer.chat_template') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count', '.expert_count'))
+            keep = key in ('general.architecture', 'general.name', 'general.type', 'split.count', 'split.no', 'tokenizer.chat_template') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count', '.expert_count', '.ple.ngram_size', '.ngram_size'))
             result_value = value(unpack('<I'), keep)
             if keep:
                 result[key] = result_value
@@ -221,7 +221,8 @@ def scan(root):
                     tool_format='llama-jinja' if arch in ('qwen35', 'qwen35moe') and '<tool_call>' in template and 'tools' in template else None,
                     experts=meta.get(arch + '.expert_count', 0), layers=meta.get(arch + '.block_count', 0),
                     draft_limit=4, nextn_layers=nextn,
-                    ngram=False, bytes=sum(p.stat().st_size for p in shards if p.is_file()), issues=issues,
+                    ngram=bool(meta.get(arch + '.ple.ngram_size') or meta.get(arch + '.ngram_size')),
+                    bytes=sum(p.stat().st_size for p in shards if p.is_file()), issues=issues,
                     receipt=None, projector=projector, recommended=False, engines=['gguf']))
             except (OSError, ValueError, KeyError, struct.error) as exc:
                 errors.append(f'{path.name}: {exc}')

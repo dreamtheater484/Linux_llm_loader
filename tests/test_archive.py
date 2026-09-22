@@ -66,7 +66,7 @@ def test_management_routes_and_library_autocomplete(tmp_path, monkeypatch):
     assert client.get('/api/archive/speed?model_id=two&sort=score').json()['total']==1
     body={'kind':'speed','ids':['0000000000000001'],'action':'delete'}
     assert client.post('/api/archive/manage',json=body).status_code==403
-    assert client.post('/api/archive/manage',json=body,headers={'X-Lumen-Local':'1'}).status_code==200
+    assert client.post('/api/archive/manage',json=body,headers={'X-Inflect-Local':'1'}).status_code==200
     assert client.get('/api/benchmarks').json()[0]['id']=='0000000000000003'
     assert client.get('/api/archive/speed?trash=true').json()['total']==1
 
@@ -86,4 +86,22 @@ def test_cancelled_speed_test_is_not_stored(tmp_path, monkeypatch):
         await started.wait();task.cancel();await task
         assert fake.benchmark['state']=='cancelled'
         assert archive.list_runs(tmp_path,'speed')['total']==0
+    asyncio.run(check())
+
+
+def test_completed_speed_test_records_runtime(tmp_path, monkeypatch):
+    async def check():
+        async def stream(*args, **kwargs):
+            yield {'type':'complete', 'tokens_per_second':50, 'prompt_tokens_per_second':250}
+        live = server.LiveOutput()
+        live.start('speed-run', 'speed', 'Speed test', {'name':'Qwen'})
+        fake = SimpleNamespace(model={'name':'Qwen'}, settings=Settings(model_id='one'), engine='gguf',
+            effective={}, stream=stream, cancel=asyncio.Event(),
+            benchmark={'id':'speed-run','state':'running','created':1,'completed':0,'total':3}, live_output=live)
+        monkeypatch.setattr(server, 'supervisor', fake)
+        monkeypatch.setattr(server, 'STATE', tmp_path)
+        await server.run_benchmark('off')
+        saved = archive.list_runs(tmp_path, 'speed')['items'][0]
+        assert saved['state'] == 'complete' and saved['elapsed_seconds'] >= 0
+        assert fake.benchmark['elapsed_seconds'] == saved['elapsed_seconds']
     asyncio.run(check())

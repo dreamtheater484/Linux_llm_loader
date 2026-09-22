@@ -15,7 +15,7 @@ def test_private_config_drives_launcher_paths(tmp_path):
     model_root.mkdir()
     data_home = tmp_path / 'data'
     config_home = tmp_path / 'config'
-    config_file = config_home / 'lumen/config.json'
+    config_file = config_home / 'inflect/config.json'
     config_file.parent.mkdir(parents=True)
     config_file.write_text(json.dumps({
         'listen_host': '10.42.7.23',
@@ -27,8 +27,8 @@ def test_private_config_drives_launcher_paths(tmp_path):
         **os.environ,
         'XDG_DATA_HOME': str(data_home),
         'XDG_CONFIG_HOME': str(config_home),
-        'LUMEN_PROJECT': str(PROJECT),
-        'LUMEN_RUNTIME': str(data_home / 'custom-runtime'),
+        'INFLECT_PROJECT': str(PROJECT),
+        'INFLECT_RUNTIME': str(data_home / 'custom-runtime'),
     }
     subprocess.run([
         sys.executable, str(PROJECT / 'scripts/install-desktop.py'),
@@ -43,7 +43,7 @@ def test_private_config_drives_launcher_paths(tmp_path):
     assert config['public_url'] == 'http://10.42.7.23:7860'
     assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
 
-    child_env = {k: v for k, v in environment.items() if k not in ('LUMEN_PROJECT', 'LUMEN_RUNTIME')}
+    child_env = {k: v for k, v in environment.items() if k not in ('INFLECT_PROJECT', 'INFLECT_RUNTIME')}
     result = subprocess.run([
         sys.executable, '-c',
         'import launch; print(launch.PROJECT); print(launch.RUNTIME); print(launch.MODEL_ROOT)',
@@ -69,7 +69,7 @@ def test_setup_help_does_not_require_installation():
 
 def test_access_configurator_can_return_to_loopback(tmp_path):
     config_home = tmp_path / 'config'
-    config_file = config_home / 'lumen/config.json'
+    config_file = config_home / 'inflect/config.json'
     config_file.parent.mkdir(parents=True)
     config_file.write_text(json.dumps({'port': 7860, 'lan_network': '10.42.7.0/24'}))
     subprocess.run([
@@ -80,3 +80,17 @@ def test_access_configurator_can_return_to_loopback(tmp_path):
     assert config['allowed_hosts'] == ['127.0.0.1', 'localhost']
     assert 'lan_network' not in config
     assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+
+
+def test_rename_discovers_existing_config_and_preserves_paths(tmp_path):
+    config_home = tmp_path / 'config'
+    old = config_home / 'previous-app/config.json'
+    old.parent.mkdir(parents=True)
+    config = dict(project=str(PROJECT), runtime=str(tmp_path/'runtime'), model_root=str(tmp_path/'models'), comfyui_container='existing-comfy', port=7860)
+    old.write_text(json.dumps(config))
+    result = subprocess.run([sys.executable, '-c', 'import launch; print(launch.CONFIG_FILE); print(launch.MODEL_ROOT)'],
+        cwd=PROJECT, env={**os.environ,'XDG_CONFIG_HOME':str(config_home)}, check=True, capture_output=True,text=True)
+    new = config_home / 'inflect/config.json'
+    assert json.loads(new.read_text()) == config
+    assert not old.exists()
+    assert str(new) in result.stdout

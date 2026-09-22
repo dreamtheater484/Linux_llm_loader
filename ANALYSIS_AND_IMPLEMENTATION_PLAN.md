@@ -4,7 +4,7 @@ This document records the product and engineering decisions without publishing w
 
 ## Goals
 
-Lumen should make large local models approachable while preserving the controls that materially affect speed and memory:
+Inflect should make large local models approachable while preserving the controls that materially affect speed and memory:
 
 - select a model and compatible inference engine;
 - configure at least a 262,144-token context window;
@@ -23,7 +23,7 @@ The first model trial uses approximately 3-bit EXL3 checkpoints. Higher-precisio
 
 ### ExLlamaV3 through TabbyAPI
 
-This is the qualified first engine because it directly supports the selected EXL3 checkpoints, CPU expert offload, quantized KV cache, vision, and checkpoint-provided prediction components. TabbyAPI supplies streaming and model lifecycle endpoints, so Lumen does not need to implement an inference scheduler.
+This is the qualified first engine because it directly supports the selected EXL3 checkpoints, CPU expert offload, quantized KV cache, vision, and checkpoint-provided prediction components. TabbyAPI supplies streaming and model lifecycle endpoints, so Inflect does not need to implement an inference scheduler.
 
 The runtime is isolated from the system Python installation. Setup pins the ExLlamaV3 wheel, PyTorch CUDA build, TabbyAPI revision, and dependency list. It performs a real CUDA calculation before declaring installation complete.
 
@@ -94,13 +94,13 @@ Capability decisions belong to the combination of engine version, architecture, 
 
 Model weight precision and KV precision are separate choices. A 3-bit checkpoint can still use Q8 KV. Recurrent state, small indexer state, vision components, and MTP components may retain native precision when required by the engine.
 
-Unused VRAM is useful only when a bottleneck can move to it. Lumen exposes CPU expert share because moving more experts to the GPU can help when transfer and CPU execution dominate, but it can hurt if it reduces cache/workspace headroom. Changes are accepted only after repeated, matched benchmarks.
+Unused VRAM is useful only when a bottleneck can move to it. Inflect exposes CPU expert share because moving more experts to the GPU can help when transfer and CPU execution dominate, but it can hurt if it reduces cache/workspace headroom. Changes are accepted only after repeated, matched benchmarks.
 
 Report prompt processing and decode separately. Also record first-token delay, cache hits, draft acceptance, RAM/VRAM peaks, context, KV mode, CPU share, engine version, and checkpoint identity. Compare uncached prompts after warm-up and keep near-full-context measurements separate from short-prompt results.
 
 ## Installation design
 
-The public repository contains no machine path. Setup accepts `--model-dir`, and optionally `--runtime-dir` and `--mount-device`. These values are written with owner-only permissions to `~/.config/lumen/config.json`.
+The public repository contains no machine path. Setup accepts `--model-dir`, and optionally `--runtime-dir` and `--mount-device`. These values are written with owner-only permissions to `~/.config/inflect/config.json`.
 
 The production frontend is committed, so a normal installation needs no Node.js toolchain. The installer:
 

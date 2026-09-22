@@ -59,7 +59,7 @@ def ready():
 
 
 def post(client, **updates):
-    return client.post('/v1/chat/completions', headers={'X-Lumen-Local': '1'}, json={
+    return client.post('/v1/chat/completions', headers={'X-Inflect-Local': '1'}, json={
         'model': 'test', 'messages': MESSAGES, 'tools': [TOOL], 'reasoning_effort': 'off', **updates})
 
 

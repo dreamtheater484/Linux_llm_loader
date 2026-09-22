@@ -10,11 +10,11 @@ from .tool_calls import native_tool_format
 from .llama_cpp import runtime_info
 
 PROJECT = Path(__file__).resolve().parents[1]
-RUNTIME = Path(os.environ.get('LUMEN_RUNTIME', Path.home() / '.local/share/linux-llm-loader'))
+RUNTIME = Path(os.environ.get('INFLECT_RUNTIME', Path.home() / '.local/share/linux-llm-loader'))
 EXL_PYTHON = RUNTIME / 'exl3/bin/python'
 VLLM = RUNTIME / 'vllm/bin/vllm'
-GGUF = Path(os.environ.get('LUMEN_GGUF_SERVER', RUNTIME / 'llama/bin/llama-server'))
-_configured_tabby = os.environ.get('LUMEN_TABBY')
+GGUF = Path(os.environ.get('INFLECT_GGUF_SERVER', RUNTIME / 'llama/bin/llama-server'))
+_configured_tabby = os.environ.get('INFLECT_TABBY')
 _legacy_tabby = PROJECT / '.runtime/sources/tabbyAPI'
 TABBY = Path(_configured_tabby).expanduser() if _configured_tabby else RUNTIME / 'sources/tabbyAPI'
 # Existing installations kept Tabby inside the project. Use it until setup migrates
@@ -30,6 +30,7 @@ class Settings(BaseModel):
     context: int = Field(262144, ge=2048, le=1048576, multiple_of=256)
     kv: Literal['Q8', 'FP16', 'Q4'] = 'Q8'
     vision: bool = True
+    ngram_ram: bool = True
     prediction: Literal['off', 'mtp'] = 'off'
     draft_tokens: int = Field(2, ge=1, le=16)
     max_output: int = Field(4096, ge=16, le=32768)
@@ -109,7 +110,8 @@ def launch(settings, model, run_dir, port, token):
             model=dict(model_dir=str(Path(model['path']).parent), model_name=Path(model['path']).name,
                        backend='exllamav3', max_seq_len=settings.context, cache_size=settings.context,
                        cache_mode=settings.kv, max_batch_size=1, chunk_size=settings.chunk_size,
-                       vision=settings.vision, vision_offload=False, ngram_ram=model['ngram'],
+                       vision=settings.vision, vision_offload=False,
+                       ngram_ram=bool(model.get('ngram') and settings.ngram_ram),
                        cpu_moe_split_experts=cpu_experts, cpu_moe_threads=settings.cpu_threads,
                        reasoning=True),
             draft_model=dict(draft_mode='mtp' if settings.prediction == 'mtp' else 'disabled',
@@ -152,6 +154,10 @@ def launch(settings, model, run_dir, port, token):
                  '--spec-draft-n-min', '0', '--spec-draft-p-min', '0', '--spec-draft-ngl', 'all']
     else:
         args += ['--spec-type', 'none']
+    if model.get('ngram'):
+        # Qwen PLE n-gram embeddings are large lazy tensors. Explicitly choose
+        # whether llama.cpp keeps them resident or reads their rows via mmap.
+        args += ['--lazy-mode', 'off' if settings.ngram_ram else 'on']
     # Avoid inheriting engine defaults that conflict with the Qwen model cards.
     if model['architecture'] in ('qwen35', 'qwen35moe'):
         args += ['--top-k', '20', '--top-p', '0.95', '--min-p', '0', '--repeat-penalty', '1']
@@ -160,4 +166,5 @@ def launch(settings, model, run_dir, port, token):
     return args, env, {'engine': 'llama.cpp', 'kv_format': settings.kv, 'cpu_offload': settings.gguf_offload,
                        'cpu_layers': cpu_layers, 'prediction': settings.prediction,
                        'draft_tokens': settings.draft_tokens if settings.prediction == 'mtp' else 0,
+                       'ngram_residency': ('ram' if settings.ngram_ram else 'storage') if model.get('ngram') else None,
                        'tool_format': model.get('tool_format'), 'runtime': runtime_info(GGUF)}

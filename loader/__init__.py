@@ -1,1 +1,1 @@
-"""Lumen: a local model workbench."""
+"""Inflect: a local model workbench."""

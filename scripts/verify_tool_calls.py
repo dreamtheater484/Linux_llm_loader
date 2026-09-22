@@ -10,11 +10,11 @@ import urllib.request
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--url', required=True, help='Lumen base URL, without /v1')
+    parser.add_argument('--url', required=True, help='Inflect base URL, without /v1')
     parser.add_argument('--output', type=Path, required=True, help='Private JSON results file')
     args = parser.parse_args()
     base = args.url.rstrip('/')
-    headers = {'Content-Type': 'application/json', 'X-Lumen-Local': '1'}
+    headers = {'Content-Type': 'application/json', 'X-Inflect-Local': '1'}
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def get(path):
@@ -29,7 +29,7 @@ def main():
     original_profiles = get('/api/profiles')
     identity = initial['model']['id']
     marker = 'SCHEMA_MARKER_' + secrets.token_hex(8)
-    function = 'lumen_probe_' + secrets.token_hex(6)
+    function = 'inflect_probe_' + secrets.token_hex(6)
     tool = {'type': 'function', 'function': {
         'name': function, 'description': 'Return a diagnostic receipt. Use this description marker as the label argument: ' + marker + '. Harmless mock; no real operation is performed.',
         'parameters': {'type': 'object', 'properties': {

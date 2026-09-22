@@ -16,7 +16,7 @@ if target.is_file():
         if hashlib.file_digest(file, 'sha256').hexdigest() == expected:
             print('Pinned wheel already verified:', target)
             sys.exit(0)
-headers = {'User-Agent': 'Lumen-Setup/0.1'}
+headers = {'User-Agent': 'Inflect-Setup/0.1'}
 release = json.load(urllib.request.urlopen(urllib.request.Request('https://api.github.com/repos/turboderp-org/exllamav3/releases/tags/v1.5.0', headers=headers)))
 asset = next(a for a in release['assets'] if a['name'] == ASSET)
 size = asset['size']

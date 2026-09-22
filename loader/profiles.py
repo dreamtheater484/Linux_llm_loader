@@ -6,6 +6,7 @@ import json
 import sqlite3
 
 from .engines import Settings
+from .metrics import RAM_ACCOUNTING
 
 
 def settings_key(settings, model):
@@ -39,6 +40,10 @@ def record_loaded_memory(state, settings, model, hardware):
     measurement = dict(vram_bytes=used('gpu'), ram_bytes=used('ram'), measured_at=hardware['timestamp'],
                        scope='system_total', phase='idle_after_load', model_id=model['id'],
                        gpu_name=(hardware.get('gpu') or {}).get('name'))
+    ram = hardware.get('ram') or {}
+    measurement.update(ram_accounting=ram.get('accounting', 'legacy_total_minus_available'),
+                       ram_cache_bytes=ram.get('cache_bytes'), ram_non_cache_bytes=ram.get('non_cache_bytes'),
+                       model_memory=hardware.get('model_memory'))
     if measurement['vram_bytes'] is None and measurement['ram_bytes'] is None:
         return False
     with sqlite3.connect(state / 'results.sqlite3') as connection:
@@ -86,7 +91,11 @@ def enrich_profile(profile, model, results, loads=None):
     automatic = compact_name(model, profile['settings'], speed) if available else profile['name']
     if available and profile.get('copy_number'):
         automatic += f" · copy {profile['copy_number']}"
+    memory = (loads or {}).get(load_key(profile['settings'], model)) if available else None
+    if memory and memory.get('ram_accounting') != RAM_ACCOUNTING:
+        memory = {**memory, 'legacy_ram_bytes': memory.get('ram_bytes'), 'ram_bytes': None,
+                  'ram_accounting': 'legacy_total_minus_available'}
     return {**profile, 'name': automatic if profile.get('auto_name') else profile['name'],
             'suggested_name': automatic, 'benchmark_results': matching[:6], 'related_results': related[:3],
             'performance': dict(decode_tps=speed, prefill_tps=prefill, decode_source=decode_source, prefill_source=prefill_source),
-            'loaded_memory': (loads or {}).get(load_key(profile['settings'], model)) if available else None}
+            'loaded_memory': memory}

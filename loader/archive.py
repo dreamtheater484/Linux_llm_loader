@@ -9,6 +9,7 @@ import statistics
 import time
 
 from fastapi import HTTPException
+from .metrics import annotate_memory
 
 TABLES = {'coding': 'evaluations', 'speed': 'benchmarks'}
 ABORTED = ('cancelled', 'interrupted', 'aborted')
@@ -28,6 +29,7 @@ def run_performance(result):
 
 
 def with_performance(result, kind):
+    result = annotate_memory(result)
     return {**result, 'performance': run_performance(result)} if kind == 'coding' else result
 
 

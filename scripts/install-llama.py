@@ -109,6 +109,6 @@ def install(runtime):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime-dir', type=Path,
-        default=Path(os.environ.get('LUMEN_RUNTIME', Path.home() / '.local/share/linux-llm-loader')))
+        default=Path(os.environ.get('INFLECT_RUNTIME', Path.home() / '.local/share/linux-llm-loader')))
     args = parser.parse_args()
     install(args.runtime_dir.expanduser().resolve())

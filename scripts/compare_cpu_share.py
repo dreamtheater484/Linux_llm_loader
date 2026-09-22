@@ -15,7 +15,7 @@ def generate(prompt, tokens):
         URL + '/api/chat',
         data=json.dumps({'messages': [{'role': 'user', 'content': prompt}],
                          'max_output': tokens, 'temperature': 0}).encode(),
-        headers={'Content-Type': 'application/json', 'X-Lumen-Local': '1'},
+        headers={'Content-Type': 'application/json', 'X-Inflect-Local': '1'},
     )
     output, metrics = '', None
     with urllib.request.urlopen(request, timeout=1800) as response:

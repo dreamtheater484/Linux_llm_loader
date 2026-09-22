@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prepare and verify real Docker graders without loading or querying a model.
 
-Run with the Lumen manager Python. --prepare downloads/builds assets; otherwise
+Run with the Inflect manager Python. --prepare downloads/builds assets; otherwise
 verification is offline and requires environments already prepared in the UI.
 It never creates synthetic model-performance records in the benchmark archive.
 """
@@ -66,7 +66,7 @@ async def verify(args):
                 results[suite] = checks
         await manager.cleanup()
         _, remaining = await manager.command('docker', 'ps', '-aq', '--filter',
-            'label=lumen.evaluation=' + digest(str(Path(args.state).resolve()))[:16])
+            'label=inflect.evaluation=' + digest(str(Path(args.state).resolve()))[:16])
         assert not remaining.strip(), 'An evaluation container was left behind'
         results['containers_cleaned'] = True
         results['model_inference_used'] = False
@@ -82,6 +82,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare', action='store_true')
     parser.add_argument('--suite', choices=['all', 'humaneval', 'swebench'], default='all')
-    parser.add_argument('--state', default=os.environ.get('LUMEN_STATE', str(Path.home() / '.local/share/linux-llm-loader/state')))
+    parser.add_argument('--state', default=os.environ.get('INFLECT_STATE', str(Path.home() / '.local/share/linux-llm-loader/state')))
     parser.add_argument('--output')
     asyncio.run(verify(parser.parse_args()))

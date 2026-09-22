@@ -25,11 +25,14 @@ def write_gguf(path, **metadata):
     path.write_bytes(data)
 
 
-def gguf_model(tmp_path, mtp=True):
+def gguf_model(tmp_path, mtp=True, ngram=False):
     path = tmp_path / 'Qwen3.8-27B-Uncensored-Q4_K_P-MTP.gguf'
-    write_gguf(path, **{'general.architecture': 'qwen35', 'general.type': 'model',
+    metadata = {'general.architecture': 'qwen35', 'general.type': 'model',
         'qwen35.block_count': 65, 'qwen35.nextn_predict_layers': int(mtp),
-        'qwen35.context_length': 262144, 'tokenizer.chat_template': '{% if enable_thinking %}tools <tool_call>{% endif %}'})
+        'qwen35.context_length': 262144, 'tokenizer.chat_template': '{% if enable_thinking %}tools <tool_call>{% endif %}'}
+    if ngram:
+        metadata['qwen35.ple.ngram_size'] = 3
+    write_gguf(path, **metadata)
     return scan(tmp_path)['models'][0]
 
 
@@ -41,6 +44,19 @@ def test_discovery_keeps_embedded_mtp_checkpoints_and_correct_quant(tmp_path):
     assert gguf_quant('Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q6_K_P') == 'Q6_K_P'
     assert gguf_quant('Qwen3.8-27B-Q6_K') == 'Q6_K'
     assert not gguf_model(tmp_path, mtp=False)['mtp']
+
+
+def test_discovery_and_launch_control_ple_ngram_residency(tmp_path):
+    model = gguf_model(tmp_path, ngram=True)
+    assert model['ngram'] is True
+    with patch('loader.engines.validate', return_value='gguf'), patch('loader.engines.runtime_info', return_value={}):
+        args, _, effective = launch(Settings(model_id=model['id'], vision=False), model, tmp_path, 9000, 'secret')
+    assert args[args.index('--lazy-mode') + 1] == 'off'
+    assert effective['ngram_residency'] == 'ram'
+    with patch('loader.engines.validate', return_value='gguf'), patch('loader.engines.runtime_info', return_value={}):
+        args, _, effective = launch(Settings(model_id=model['id'], vision=False, ngram_ram=False), model, tmp_path, 9000, 'secret')
+    assert args[args.index('--lazy-mode') + 1] == 'on'
+    assert effective['ngram_residency'] == 'storage'
 
 
 def test_projector_requires_unambiguous_matching_checkpoint(tmp_path):

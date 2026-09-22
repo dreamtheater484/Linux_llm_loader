@@ -28,16 +28,17 @@ import zipfile
 
 from fastapi import HTTPException
 from .engines import RUNTIME, TABBY, GGUF
+from .reasoning import reasoning_kwargs
 from .archive import ABORTED, discard_aborted, discard_run, list_runs, run_performance, with_performance
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE = 'lumen-benchmark-tools:1'
-PROTOCOL = 'lumen-coding-v2'
+IMAGE = 'inflect-benchmark-tools:1'
+PROTOCOL = 'inflect-coding-v2'
 SUITES = {
     'humaneval': dict(name='Quick coding', benchmark='HumanEval+', count=80,
-                     grader_seconds=120, runner='Lumen single-answer v2', selection='lumen-humaneval-80-v1'),
+                     grader_seconds=120, runner='Inflect single-answer v2', selection='inflect-humaneval-80-v1'),
     'swebench': dict(name='Repository coding', benchmark='SWE-bench Lite', count=3,
-                    grader_seconds=150, runner='Lumen bash agent v2', selection='lumen-swe-offline-v2'),
+                    grader_seconds=150, runner='Inflect bash agent v2', selection='inflect-swe-offline-v2'),
 }
 PRESETS = {
     600: dict(id='short', label='Short', human_tasks=20, repository_tasks=1),
@@ -123,7 +124,7 @@ def runtime_identity(engine):
     source = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
               for p in [*sorted((ROOT / 'loader').glob('*.py')), ROOT / 'benchmarks/worker.py', ROOT / 'benchmarks/Dockerfile']}
     result = dict(platform=platform.platform(), python=platform.python_version(), packages=packages,
-                  lumen_sources=source, lumen_source_hash=digest(source))
+                  inflect_sources=source, inflect_source_hash=digest(source))
     if engine == 'exl3':
         # Include the working code, including local patches, rather than a displayed version label.
         result['tabby_sources_hash'] = digest({str(p.relative_to(TABBY)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -170,6 +171,7 @@ def report_markdown(result):
              f"- Recorded tokens: {summary['input_tokens']:,} input / {summary['output_tokens']:,} output (including reasoning; completed turns only)",
              f"- Decode: {speed('decode_tps')} tok/s · prefill: {speed('prefill_tps')} tok/s (per-response medians; engine timings, excluding test execution)",
              f"- First token: {speed('first_token_seconds')} s median; prefill timings reflect prompt-cache reuse",
+             '- RAM accounting: physical_including_cache_v1 includes resident file cache. Legacy total-minus-available readings exclude reclaimable pages and understate model residency. Model PSS is included in system RAM, not additional to it. Peak components are independent maxima.',
              f"- Runner: {result['runner']} · protocol: `{result['protocol_hash']}`",
              f"- Dataset revision: `{result['dataset']['revision']}` · subset: `{result['dataset']['fingerprint']}`",
              '', f'> {scope_note} This is not a full benchmark or official leaderboard score.',
@@ -293,8 +295,9 @@ class EvaluationManager:
         try:
             with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as z:
                 z.writestr('report.md', report_markdown(result))
+                z.writestr('report.json', json.dumps(result, indent=2, ensure_ascii=False))
                 for path in root.rglob('*'):
-                    if path.is_file() and path.suffix not in ('.zip', '.tmp') and not path.is_symlink():
+                    if path.is_file() and path.relative_to(root).as_posix() not in ('report.md', 'report.json') and path.suffix not in ('.zip', '.tmp') and not path.is_symlink():
                         z.write(path, path.relative_to(root))
             temporary.replace(archive)
         finally:
@@ -350,7 +353,7 @@ class EvaluationManager:
         return proc.returncode, text
 
     def container_name(self):
-        name = 'lumen-eval-' + secrets.token_hex(10)
+        name = 'inflect-eval-' + secrets.token_hex(10)
         self.containers.add(name)  # Register before create; cancellation can race Docker.
         return name
 
@@ -368,7 +371,7 @@ class EvaluationManager:
         if not shutil.which('docker'):
             return
         try:
-            _, names = await self.command('docker', 'ps', '-aq', '--filter', 'label=lumen.evaluation=' + digest(str(self.state.resolve()))[:16], timeout=5)
+            _, names = await self.command('docker', 'ps', '-aq', '--filter', 'label=inflect.evaluation=' + digest(str(self.state.resolve()))[:16], timeout=5)
             for name in names.splitlines():
                 if re.fullmatch(r'[a-f0-9]{12,64}', name):
                     await self.remove(name)
@@ -378,7 +381,7 @@ class EvaluationManager:
     def restrictions(self):
         return ['--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                 '--pids-limit', '256', '--memory', '4g', '--memory-swap', '4g', '--cpus', '2',
-                '--label', 'lumen.evaluation=' + digest(str(self.state.resolve()))[:16]]
+                '--label', 'inflect.evaluation=' + digest(str(self.state.resolve()))[:16]]
 
     async def worker(self, mode, body=None, image=None, network=False, timeout=1200):
         name = self.container_name()
@@ -392,7 +395,7 @@ class EvaluationManager:
             if mode == 'manifest-swe':
                 args[args.index('--read-only'):args.index('--read-only') + 1] = ['--tmpfs', '/opt/cache:rw,nosuid,size=1g']
             _, output = await self.command(*args, input=json.dumps(body) if body is not None else None, timeout=timeout)
-            records = [line[len('LUMEN_RESULT='):] for line in output.splitlines() if line.startswith('LUMEN_RESULT=')]
+            records = [line[len('INFLECT_RESULT='):] for line in output.splitlines() if line.startswith('INFLECT_RESULT=')]
             if len(records) != 1:
                 raise RuntimeError('Grader returned no unambiguous result. See benchmark setup/runtime logs.')
             return json.loads(records[0])
@@ -422,7 +425,7 @@ class EvaluationManager:
                 await self.command('docker', 'info', '--format', '{{.ServerVersion}}', timeout=5)
                 message = ''
             except (OSError, RuntimeError, TimeoutError):
-                docker, message = False, 'Docker is installed but its daemon is unavailable to Lumen. Start Docker and check user permissions.'
+                docker, message = False, 'Docker is installed but its daemon is unavailable to Inflect. Start Docker and check user permissions.'
         suites = {}
         for suite, config in SUITES.items():
             try:
@@ -441,6 +444,8 @@ class EvaluationManager:
         return dict(id=self.current['id'], state=self.current['state'], suite=self.current['suite'],
                     name=self.current['benchmark'], created=self.current['created'], deadline=self.current['deadline'],
                     preset=self.current.get('preset'), preset_label=self.current.get('preset_label'),
+                    elapsed_seconds=(round(time.time() - self.current['created'], 1)
+                                     if self.current['state'] == 'running' else self.current.get('elapsed_seconds', 0)),
                     summary=self.current['summary'], tasks=self.current['tasks'], model=self.current['model'])
 
     def assert_idle(self):
@@ -527,7 +532,7 @@ class EvaluationManager:
             reason = f'the official reference fix failed {required} required tests and {regressions} regression tests'
         return f'Environment check failed for {task_id}: {reason}. See the setup log for details.'
 
-    async def start(self, suite, model_id, budget_seconds=1800):
+    async def start(self, suite, model_id, budget_seconds=1800, reasoning_effort=None):
         self.assert_idle()
         if self.supervisor.state != 'ready' or not self.supervisor.model or self.supervisor.model['id'] != model_id:
             raise ValueError('Load the model shown in the benchmark configuration before starting.')
@@ -544,6 +549,9 @@ class EvaluationManager:
             raise HTTPException(409, 'The loaded model changed during benchmark preflight.')
         settings = copy.deepcopy(self.supervisor.settings.model_dump())
         model = clean(copy.deepcopy(self.supervisor.model))
+        if reasoning_effort is not None:
+            settings['reasoning_effort'] = reasoning_effort
+        reasoning_kwargs(model, settings['reasoning_effort'])
         # Metadata identity does not pretend to be a multi-gigabyte weight checksum.
         identity = dict(model=model, files=[])
         path = Path(model['path'])
@@ -673,7 +681,7 @@ class EvaluationManager:
     async def checkpoint_patch(self, name, index, source, task):
         _, patch = await self.command('docker', 'exec', name, 'bash', '-lc',
             'set -e\ncd /testbed\n'
-            'export GIT_INDEX_FILE=$(mktemp /tmp/lumen-patch-index.XXXXXX)\n'
+            'export GIT_INDEX_FILE=$(mktemp /tmp/inflect-patch-index.XXXXXX)\n'
             'trap \'rm -f "$GIT_INDEX_FILE" "$GIT_INDEX_FILE.lock"\' EXIT\n'
             'rm -f "$GIT_INDEX_FILE"\n'
             f'git read-tree {source["base_commit"]}\ngit add -A\ngit diff --cached --binary {source["base_commit"]}', timeout=15)

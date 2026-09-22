@@ -8,6 +8,72 @@ from collections import deque
 import psutil
 
 
+RAM_ACCOUNTING = 'physical_including_cache_v1'
+
+
+def system_memory(vm=None):
+    """Physical occupancy, not memory pressure. Linux cached includes reclaimable slab."""
+    vm = psutil.virtual_memory() if vm is None else vm
+    occupied = max(0, vm.total - vm.free)
+    cache = min(occupied, max(0, vm.cached + vm.buffers - vm.shared))
+    return dict(used_bytes=occupied, total_bytes=vm.total, free_bytes=vm.free,
+                available_bytes=vm.available, cache_bytes=cache,
+                non_cache_bytes=occupied - cache, accounting=RAM_ACCOUNTING)
+
+
+def process_memory(pid, proc_root=Path('/proc')):
+    """Resident engine + worker memory, proportionally counting shared pages (PSS)."""
+    try:
+        root = psutil.Process(pid)
+        processes = [root, *root.children(recursive=True)]
+        totals = dict(resident_bytes=0, anonymous_bytes=0, file_bytes=0, shared_bytes=0, swap_bytes=0)
+        fields = dict(resident_bytes='Pss', anonymous_bytes='Pss_Anon', file_bytes='Pss_File',
+                      shared_bytes='Pss_Shmem', swap_bytes='SwapPss')
+        for process in processes:
+            try:
+                content = (proc_root / str(process.pid) / 'smaps_rollup').read_text()
+            except FileNotFoundError:
+                if process.pid == pid:
+                    return None
+                continue  # A worker exited during the snapshot.
+            values = {parts[0].rstrip(':'): int(parts[1]) * 1024
+                      for line in content.splitlines() if len(parts := line.split()) == 3 and parts[2] == 'kB'}
+            for key, field in fields.items():
+                if field not in values:
+                    return None  # Never represent an unreadable measurement as zero.
+                totals[key] += values[field]
+        if not root.is_running():
+            return None
+        return dict(**totals, pid=pid, sampled_at=time.time(), accounting='process_tree_pss')
+    except (OSError, ValueError, psutil.Error):
+        return None
+
+
+def memory_peaks(samples):
+    def peak(section, field):
+        values = [(s.get(section) or {}).get(field) for s in samples]
+        return max((v for v in values if type(v) in (int, float) and math.isfinite(v)), default=None)
+    return dict(ram_bytes=peak('ram', 'used_bytes'), ram_accounting=RAM_ACCOUNTING,
+                ram_cache_bytes=peak('ram', 'cache_bytes'), ram_non_cache_bytes=peak('ram', 'non_cache_bytes'),
+                model_ram_bytes=peak('model_memory', 'resident_bytes'),
+                model_file_bytes=peak('model_memory', 'file_bytes'), model_ram_accounting='process_tree_pss')
+
+
+def annotate_memory(value):
+    """Label historical exports without inventing missing cache or resident measurements."""
+    if isinstance(value, dict):
+        if isinstance(value.get('hardware_peaks'), dict):
+            value['hardware_peaks'].setdefault('ram_accounting', 'legacy_total_minus_available')
+        if isinstance(value.get('ram'), dict) and 'used_bytes' in value['ram']:
+            value['ram'].setdefault('accounting', 'legacy_total_minus_available')
+        for child in value.values():
+            annotate_memory(child)
+    elif isinstance(value, list):
+        for child in value:
+            annotate_memory(child)
+    return value
+
+
 def number(value):
     try:
         result = float(value)
@@ -81,18 +147,29 @@ def parse_gpu(output):
 
 
 class Telemetry:
-    def __init__(self):
+    def __init__(self, engine_pid=lambda: None):
         self.value = {'cpu_percent': None, 'gpu': None, 'ram': None, 'timestamp': None}
         self.history = deque(maxlen=3600)
         self.cpu_power = CpuPower()
+        self.engine_pid = engine_pid
+        self.model_memory = None
+
+    async def sample_model(self):
+        pid = self.engine_pid()
+        previous = self.model_memory
+        if not pid:
+            self.model_memory = None
+        elif not previous or previous['pid'] != pid or time.time() - previous['sampled_at'] >= 5:
+            measured = await asyncio.to_thread(process_memory, pid)
+            self.model_memory = measured if self.engine_pid() == pid else None
+        return self.model_memory
 
     async def run(self):
         psutil.cpu_percent()
         while True:
-            vm = psutil.virtual_memory()
             data = dict(cpu_percent=psutil.cpu_percent(), cpu_count=psutil.cpu_count(),
                         cpu_power=self.cpu_power.sample(),
-                        ram={'used_bytes': vm.total - vm.available, 'total_bytes': vm.total, 'available_bytes': vm.available},
+                        ram=system_memory(), model_memory=await self.sample_model(),
                         gpu=None, timestamp=time.time(), gpu_error=None)
             proc = None
             try:

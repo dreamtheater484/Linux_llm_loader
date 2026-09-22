@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Install Lumen on a clean x86_64 Ubuntu machine without changing its GPU driver.
+# Install Inflect on a clean x86_64 Ubuntu machine without changing its GPU driver.
 set -euo pipefail
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-runtime_dir="${LUMEN_RUNTIME:-${XDG_DATA_HOME:-$HOME/.local/share}/linux-llm-loader}"
-model_dir="${LUMEN_MODEL_ROOT:-}"
-mount_device="${LUMEN_MOUNT_DEVICE:-}"
+runtime_dir="${INFLECT_RUNTIME:-${XDG_DATA_HOME:-$HOME/.local/share}/linux-llm-loader}"
+model_dir="${INFLECT_MODEL_ROOT:-}"
+mount_device="${INFLECT_MOUNT_DEVICE:-}"
 install_desktop=1
 preflight_only=0
 install_benchmarks=0
@@ -21,7 +21,7 @@ Required:
 Optional:
   --runtime-dir PATH     Private Python and engine files (default: ~/.local/share/linux-llm-loader)
   --mount-device PATH    Removable model drive, such as /dev/disk/by-uuid/...
-  --no-desktop           Configure Lumen without an application-menu shortcut
+  --no-desktop           Configure Inflect without an application-menu shortcut
   --preflight-only       Check the machine and arguments without installing
   --with-benchmarks      Install Docker, enable its service, and grant this user Docker-group access
   --with-llama           Install the pinned CUDA llama.cpp runtime for GGUF and embedded MTP
@@ -169,7 +169,7 @@ fi
 [[ -f "$project_dir/frontend/dist/index.html" ]] || {
     echo 'The compiled interface is missing from this checkout.' >&2; exit 1;
 }
-LUMEN_RUNTIME="$runtime_dir" "$exl_dir/bin/python" "$project_dir/scripts/probe_runtime.py"
+INFLECT_RUNTIME="$runtime_dir" "$exl_dir/bin/python" "$project_dir/scripts/probe_runtime.py"
 if ((install_llama)); then
     "$manager_dir/bin/python" "$project_dir/scripts/install-llama.py" --runtime-dir "$runtime_dir"
 fi
@@ -177,7 +177,7 @@ fi
 desktop_args=(--model-dir "$model_dir")
 [[ -n "$mount_device" ]] && desktop_args+=(--mount-device "$mount_device")
 ((install_desktop)) || desktop_args+=(--no-desktop)
-LUMEN_PROJECT="$project_dir" LUMEN_RUNTIME="$runtime_dir" \
+INFLECT_PROJECT="$project_dir" INFLECT_RUNTIME="$runtime_dir" \
     "$manager_dir/bin/python" "$project_dir/scripts/install-desktop.py" "${desktop_args[@]}"
 
 echo
@@ -185,7 +185,7 @@ echo 'Setup complete.'
 echo "Models: $model_dir"
 echo "Runtime: $runtime_dir"
 if ((install_desktop)); then
-    echo 'Open Lumen from the application menu, or run ./launch.sh.'
+    echo 'Open Inflect from the application menu, or run ./launch.sh.'
 else
-    echo 'Run ./launch.sh to start Lumen.'
+    echo 'Run ./launch.sh to start Inflect.'
 fi

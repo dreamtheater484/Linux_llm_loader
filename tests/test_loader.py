@@ -65,6 +65,9 @@ def test_exl_config_maps_capacity_vision_cache_prediction_and_ram(tmp_path):
     assert config['network']['api_servers'] == ['oai']
     assert (tmp_path / 'api_tokens.yml').stat().st_mode & 0o777 == 0o600
     assert str(tmp_path / 'config.yml') in args
+    with patch('loader.engines.validate', return_value='exl3'):
+        _, _, streamed = launch(Settings(model_id='test', ngram_ram=False), model(), tmp_path, 5051, 'test-key')
+    assert streamed['model']['ngram_ram'] is False
 
 
 def test_gpu_metrics_keep_units_and_unavailable_values():
@@ -134,7 +137,7 @@ def test_profile_migration_edit_collision_delete_restore(tmp_path):
     old = {'name': 'Everyday', 'settings': Settings(model_id='test').model_dump()}
     path = tmp_path / 'profiles.json'
     path.write_text(json.dumps([old]))
-    headers = {'X-Lumen-Local': '1'}
+    headers = {'X-Inflect-Local': '1'}
     with patch.object(server, 'STATE', tmp_path), patch.object(server.supervisor, 'lookup', return_value=model()), patch.object(server.supervisor, 'refresh'):
         with TestClient(server.app) as client:
             initial = client.get('/api/profiles').json()
@@ -201,8 +204,8 @@ def test_management_api_rejects_cross_site_calls(tmp_path):
     with patch.object(server, 'STATE', tmp_path), patch.object(server.supervisor, 'refresh'):
         with TestClient(server.app) as client:
             assert client.post('/api/cancel').status_code == 403
-            assert client.post('/api/cancel', headers={'X-Lumen-Local':'1', 'Origin':'https://unrelated.example'}).status_code == 403
-            assert client.post('/api/cancel', headers={'X-Lumen-Local':'1'}, json={}).status_code == 200
+            assert client.post('/api/cancel', headers={'X-Inflect-Local':'1', 'Origin':'https://unrelated.example'}).status_code == 403
+            assert client.post('/api/cancel', headers={'X-Inflect-Local':'1'}, json={}).status_code == 200
             assert client.get('/api/status').status_code == 200
 
 

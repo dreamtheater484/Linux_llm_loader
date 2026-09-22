@@ -1,15 +1,17 @@
 import {useEffect,useLayoutEffect,useRef,useState} from 'react';
-import {ArrowDown,Copy,Maximize2,Minimize2,Minus,Terminal} from 'lucide-react';
+import {ArrowDown,Clock3,Copy,Maximize2,Minimize2,Minus,Terminal} from 'lucide-react';
 import {Modal,formatNumber} from './ui';
 import './benchmark-live.css';
 
 type Block={id:number;revision:number;kind:string;text:string;timestamp:number};
 type Api=(path:string,body?:unknown,method?:string)=>Promise<any>;
+const duration=(seconds:number)=>{const total=Math.floor(Math.max(0,seconds||0)),hours=Math.floor(total/3600),minutes=Math.floor(total%3600/60),secs=total%60;return hours?`${hours}h ${String(minutes).padStart(2,'0')}m ${String(secs).padStart(2,'0')}s`:`${minutes}m ${String(secs).padStart(2,'0')}s`};
 export function BenchmarkLive({session,request,copy,onResults}:{session:any;request:Api;copy:(text:string)=>Promise<void>;onResults:(kind:string,id:string)=>void}) {
   const meta=session?.live_output;
   const [blocks,setBlocks]=useState<Block[]>([]),[mode,setMode]=useState<'panel'|'full'|'minimized'>('panel');
   const [follow,setFollow]=useState(true),[error,setError]=useState(''),[truncated,setTruncated]=useState(false),[copied,setCopied]=useState(false);
   const [result,setResult]=useState<any>(null),[finished,setFinished]=useState<any>(null);
+  const [now,setNow]=useState(Date.now()/1000);
   const cursor=useRef(0),runId=useRef(''),observed=useRef(''),announced=useRef('');
   const body=useRef<HTMLDivElement>(null);
   useEffect(()=>{
@@ -38,18 +40,21 @@ export function BenchmarkLive({session,request,copy,onResults}:{session:any;requ
   const loadResult=async(run:any)=>{try{const result=run.kind==='coding'?await request(`/api/evaluations/${run.id}`):(await request('/api/benchmarks')).find((r:any)=>r.id===run.id);if(!result)throw new Error('Result not found');setResult(result);setError('')}catch(e){setError('Could not load the result: '+String(e))}};
   useLayoutEffect(()=>{if(follow&&body.current)body.current.scrollTop=body.current.scrollHeight},[blocks,mode,follow]);
   useEffect(()=>{const escape=(event:KeyboardEvent)=>{if(event.key==='Escape')setMode(old=>old==='full'?'panel':old)};window.addEventListener('keydown',escape);return()=>window.removeEventListener('keydown',escape)},[]);
+  const running=meta?.state==='running';
+  const liveRun=meta?.kind==='coding'?session?.evaluation:session?.benchmark;
+  const elapsed=running?(liveRun?.created?now-liveRun.created:liveRun?.elapsed_seconds||0):(result?.elapsed_seconds??liveRun?.elapsed_seconds);
+  useEffect(()=>{if(!running)return;const timer=setInterval(()=>setNow(Date.now()/1000),1000);return()=>clearInterval(timer)},[running,meta?.id]);
   const copyTail=async()=>{try{await copy(blocks.map(b=>b.text).join(''));setCopied(true);setTimeout(()=>setCopied(false),2000)}catch{setError('Copy failed. Select the output and press Ctrl+C.')}};
   if(!meta)return null;
-  const running=meta.state==='running';
   return <>
-    {mode==='minimized'?<button className="benchmark-tail-minimized" onClick={()=>setMode('panel')}><Terminal size={15}/>{meta.title} · {running?'Live output':meta.state}<Maximize2 size={13}/></button>:
+    {mode==='minimized'?<button className="benchmark-tail-minimized" onClick={()=>setMode('panel')}><Terminal size={15}/>{meta.title} · {running?`${duration(elapsed)} elapsed`:meta.state}<Maximize2 size={13}/></button>:
       <section className={`benchmark-tail ${mode==='full'?'fullscreen':''}`} aria-label="Live benchmark output">
         <header><Terminal size={16}/><div><strong>{meta.title} <i className={running?'live':''}/></strong><span title={meta.model.name}>{meta.model.name} · {meta.state}</span></div>
           <button aria-label={copied?'Output copied':'Copy visible benchmark output'} title="Copy retained output" onClick={copyTail}><Copy size={15}/>{copied?'Copied':''}</button>
           <button aria-label={mode==='full'?'Exit full-screen benchmark output':'Expand benchmark output full screen'} onClick={()=>setMode(mode==='full'?'panel':'full')}>{mode==='full'?<Minimize2 size={16}/>:<Maximize2 size={16}/>}</button>
           <button aria-label="Minimize benchmark output" onClick={()=>setMode('minimized')}><Minus size={18}/></button>
         </header>
-        <div className="benchmark-tail-controls"><span>Model output · thinking · commands · test progress</span><label><input type="checkbox" checked={follow} onChange={e=>setFollow(e.target.checked)}/>Follow tail</label></div>
+        <div className="benchmark-tail-controls"><span><Clock3 size={12}/> {elapsed==null?'Runtime unavailable':`${duration(elapsed)} elapsed`} · Model output · thinking · commands · test progress</span><label><input type="checkbox" checked={follow} onChange={e=>setFollow(e.target.checked)}/>Follow tail</label></div>
         {error&&<p className="benchmark-tail-error" role="status">{error}</p>}
         <div className="benchmark-tail-body" ref={body} tabIndex={0} aria-label="Benchmark terminal output" onScroll={e=>{const el=e.currentTarget;if(el.scrollHeight-el.scrollTop-el.clientHeight>60&&follow)setFollow(false)}}>
           {truncated&&<p className="tail-truncated">Earlier output trimmed. This window keeps the latest output; completed coding runs retain their full artifacts.</p>}
@@ -63,9 +68,10 @@ export function BenchmarkLive({session,request,copy,onResults}:{session:any;requ
       </section>}
     {finished&&<Modal title={finished.state==='complete'?'Benchmark finished':'Benchmark ended'} onClose={()=>setFinished(null)} className="benchmark-finished-dialog">
       <p className="eyebrow">{finished.title} · {finished.state}</p><h3 title={finished.model.name}>{finished.model.name}</h3>
-      {result?<>
+        {result?<>
         {result.summary&&<div className="benchmark-finished-score"><strong>{result.summary.score==null?'Incomplete grading':`${result.summary.score}%`}</strong><span>{result.summary.passed}/{result.summary.total} tasks passed · {result.summary.graded} fully graded</span></div>}
         <div className="profile-priority-metrics"><div><span>Generation</span><strong>{formatNumber(result.performance?.decode_tps??result.median_tps)} <small>tok/s</small></strong></div><div><span>Prefill</span><strong>{formatNumber(result.performance?.prefill_tps??result.median_prompt_tps,0)} <small>tok/s</small></strong></div></div>
+        <p className="dialog-description"><Clock3 size={13}/> Total runtime: {result.elapsed_seconds==null?'not recorded':duration(result.elapsed_seconds)}</p>
         <p className="dialog-description">Median engine speeds. Prefill reflects prompt-cache reuse.</p>
         {result.suite==='swebench'&&<p className="dialog-description">Each issue is resolved or unresolved, without partial credit. {result.summary.total===1?'This preset tests one issue, so only 0% or 100% is possible.':`This preset tests ${result.summary.total} issues; intermediate percentages reflect the number resolved.`}</p>}
         {result.error&&<p role="alert">{result.error}</p>}

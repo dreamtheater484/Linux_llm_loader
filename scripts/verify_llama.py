@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise Lumen's GGUF models, including real MTP on/off, through its public API.
+"""Exercise Inflect's GGUF models, including real MTP on/off, through its public API.
 
-This switches loaded models. Point it at an idle Lumen instance; it finishes unloaded.
+This switches loaded models. Point it at an idle Inflect instance; it finishes unloaded.
 """
 import argparse
 import base64
@@ -22,7 +22,7 @@ def main():
     args = parser.parse_args()
     def request(path, body=None):
         req = urllib.request.Request(args.url + path, data=json.dumps(body).encode() if body is not None else None,
-            headers={'Content-Type': 'application/json', 'X-Lumen-Local': '1'})
+            headers={'Content-Type': 'application/json', 'X-Inflect-Local': '1'})
         try:
             return urllib.request.urlopen(req, timeout=1800)
         except urllib.error.HTTPError as exc:

@@ -15,7 +15,7 @@ export function LoadFeedback({session,pendingName,onCancel,onLogs,onChat}:{sessi
     previous.current=session;
   },[session?.state,session?.started]);
   if(preparing||stopping)return <section className="model-load-banner" aria-label="Model loading status">
-    <LoaderCircle size={25} className="spin"/><div className="load-banner-copy"><strong role="status">{stopping?'Unloading':'Loading'} {pendingName||session?.model?.title||'model'}</strong><p>{pendingName?'Preparing the model and freeing the previous model’s memory.':stopping?'Releasing model memory.':'Preparing weights, context cache and inference.'} {!pendingName&&session?.elapsed_seconds!=null&&!stopping&&<b>{Math.floor(session.elapsed_seconds)}s elapsed</b>}</p><div className="load-indicator" role="progressbar" aria-label="Loading model"><i/></div></div>
+    <LoaderCircle size={25} className="spin"/><div className="load-banner-copy"><strong role="status">{stopping?'Unloading':'Loading'} {pendingName||session?.model?.title||'model'}</strong><p>{pendingName?'Preparing the model and freeing the previous model’s memory.':stopping?'Releasing model memory.':session?.load_detail||'Preparing weights, context cache and inference.'} {!pendingName&&session?.elapsed_seconds!=null&&!stopping&&<b>{Math.floor(session.elapsed_seconds)}s elapsed</b>}</p><div className="load-indicator" role="progressbar" aria-label="Loading model"><i/></div></div>
     <button className="secondary" onClick={onLogs}><Terminal size={14}/>Logs</button>{!stopping&&!pendingName&&<button className="secondary" onClick={onCancel}>Cancel</button>}
   </section>;
   if(!notice||session?.state!=='ready')return null;
