@@ -11,6 +11,12 @@ from loader import comfyui, server
 from loader.engines import Settings
 
 
+@pytest.fixture(autouse=True)
+def configured_integration(monkeypatch):
+    monkeypatch.setattr(server.app_settings, 'comfy_settings', lambda: dict(
+        enabled=True, mode='api', url='http://127.0.0.1:8188', container=''))
+
+
 def stats(reserved=0):
     return {'system': {'comfyui_version': '0.37.0'}, 'devices': [
         {'type': 'cuda', 'torch_vram_total': reserved, 'vram_free': 10*2**30}]}
@@ -115,14 +121,14 @@ def test_engine_launch_is_gated_on_comfyui_cleanup(monkeypatch,tmp_path,fail):
     monkeypatch.setattr(server.psutil,'virtual_memory',lambda:SimpleNamespace(available=200*2**30))
     async def check():
         entered,release=asyncio.Event(),asyncio.Event()
-        async def cleanup(progress):
+        async def cleanup(progress, **kwargs):
             entered.set()
             await release.wait()
             if fail:raise RuntimeError('Cleanup failed')
             return {'state':'released'}
         monkeypatch.setattr(server,'release_comfyui',cleanup)
         pending=asyncio.create_task(supervisor._load())
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 2)
         launch.assert_not_called()
         release.set()
         await pending
@@ -137,12 +143,12 @@ def test_cancelling_load_while_waiting_never_starts_engine(monkeypatch):
     monkeypatch.setattr(server,'launch',launch)
     async def check():
         entered=asyncio.Event()
-        async def cleanup(progress):
+        async def cleanup(progress, **kwargs):
             entered.set()
             await asyncio.Event().wait()
         monkeypatch.setattr(server,'release_comfyui',cleanup)
         pending=asyncio.create_task(supervisor._load())
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 2)
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):await pending
         launch.assert_not_called()

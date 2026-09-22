@@ -1,0 +1,7 @@
+{
+  "version": "1.5.0",
+  "package_version": "1.5.0+cu128.torch2.9.0",
+  "tabby_revision": "53da7919d4e45c63f4acbcbbc00cbe0f60a1ce65",
+  "torch": "2.9.0+cu128",
+  "python": "3.12"
+}

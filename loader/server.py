@@ -16,6 +16,8 @@ import signal
 import socket
 import sqlite3
 import statistics
+import subprocess
+import sys
 import time
 from typing import Literal
 
@@ -38,6 +40,9 @@ from .live_output import LiveOutput
 from .archive import ABORTED, list_runs, manage_runs, run_performance
 from .comfyui import release_comfyui, restore_comfyui
 from .chat_api import conversation_router
+from . import engines, app_settings
+from .engine_updates import EngineUpdater, engine_details
+from inflect_access import access_config, lan_interfaces, private_lan
 
 MODEL_ROOT = Path(os.environ.get('INFLECT_MODEL_ROOT', Path.home() / 'models')).expanduser()
 STATE = Path(os.environ.get('INFLECT_STATE', RUNTIME / 'state'))
@@ -47,6 +52,8 @@ ALLOWED_HOSTS = {'localhost', '127.0.0.1', 'testserver'} | {
     host.strip() for host in os.environ.get('INFLECT_ALLOWED_HOSTS', '').split(',') if host.strip()
 }
 telemetry = Telemetry(lambda: supervisor.proc.pid if supervisor.proc and supervisor.proc.returncode is None else None)
+engine_updater = EngineUpdater()
+restarting = False
 
 
 def client_allowed(host):
@@ -58,7 +65,8 @@ def client_allowed(host):
         return False
     if address.is_loopback:
         return True
-    return LAN_NETWORK is not None and address in LAN_NETWORK
+    return (LAN_NETWORK is not None and address in LAN_NETWORK
+            and private_lan(str(address), str(LAN_NETWORK)))
 
 
 def origin_allowed(origin):
@@ -175,6 +183,8 @@ class Supervisor:
 
     async def start(self, settings):
         async with self.operation:
+            if engine_updater.active or restarting:
+                raise HTTPException(409, 'Wait for the engine update or restart to finish before loading a model.')
             if evaluations.active or evaluations.preparing:
                 raise HTTPException(409, 'Stop the benchmark or its preparation before loading another model.')
             model = self.lookup(settings.model_id)
@@ -187,7 +197,7 @@ class Supervisor:
             self.logs.clear()
             self.started = time.time()
             self.last_usage = None
-            self.load_detail = 'Checking ComfyUI before loading the model…'
+            self.load_detail = 'Preparing to load the model…'
             self.task = asyncio.create_task(self._load())
 
     async def _read_logs(self, proc, log_path):
@@ -214,7 +224,12 @@ class Supervisor:
             self.load_detail = message
             self.logs.append('INFLECT: ' + message)
         try:
-            self.memory_preparation = await release_comfyui(progress)
+            integration = app_settings.comfy_settings()
+            if integration['enabled']:
+                self.memory_preparation = await release_comfyui(progress, url=integration['url'],
+                    container=integration['container'] if integration['mode'] == 'docker' else '')
+            else:
+                self.memory_preparation = None
             if psutil.virtual_memory().available < self.model['bytes'] * self.settings.cpu_percent / 100 + 16 * 2**30:
                 raise ValueError('Insufficient available RAM for this placement plus 16 GiB headroom.')
             progress('Loading model weights and context cache…')
@@ -492,6 +507,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        await engine_updater.close()
         await evaluations.stop()
         await supervisor.stop()
         for task in tasks:
@@ -540,6 +556,108 @@ async def status():
     return {'session': supervisor.snapshot(), 'hardware': telemetry.value, 'engines': engine_inventory()}
 
 
+def active_preferences():
+    return dict(model_root=str(MODEL_ROOT), gguf_server=str(engines.GGUF),
+                exl_python=str(engines.EXL_PYTHON), tabby_dir=str(engines.TABBY), port=PORT,
+                listen_host=os.environ.get('INFLECT_LISTEN_HOST', '127.0.0.1'),
+                lan_network=str(LAN_NETWORK) if LAN_NETWORK else '')
+
+
+def preferences_snapshot():
+    config = app_settings.read_config()
+    active = active_preferences()
+    interfaces = lan_interfaces()
+    saved = app_settings.values(config, active)
+    target = access_config({**config, **saved}, interfaces)
+    restart_keys = [key for key in ('model_root', 'gguf_server', 'exl_python', 'tabby_dir') if saved[key] != active[key]]
+    restart_keys += [key for key in ('port', 'listen_host', 'lan_network') if target[key] != active[key]]
+    return dict(values=saved, revision=app_settings.revision(config), interfaces=interfaces,
+                active={**active, 'url': f"http://{active['listen_host']}:{PORT}"},
+                next_url=target['public_url'], next_subnet=target['lan_network'],
+                restart_required=bool(restart_keys), restart_keys=restart_keys,
+                storage=dict(config=str(app_settings.config_path()), runtime=str(RUNTIME), data=str(STATE)))
+
+
+@app.get('/api/settings')
+async def get_preferences():
+    return await asyncio.to_thread(preferences_snapshot)
+
+
+@app.put('/api/settings')
+async def put_preferences(body: app_settings.SavePreferences):
+    if engine_updater.active or restarting:
+        raise HTTPException(409, 'Wait for the engine update or restart to finish before saving settings.')
+    # Serialize configuration writes on the event loop; no await between busy check and save.
+    app_settings.save_preferences(body, active_preferences())
+    return preferences_snapshot()
+
+
+@app.get('/api/settings/engines')
+async def settings_engines():
+    return dict(engines=await asyncio.to_thread(engine_details), update=engine_updater.snapshot())
+
+
+@app.post('/api/settings/engines/{engine_id}/update', status_code=202)
+async def update_engine(engine_id: Literal['gguf', 'exl3']):
+    async with supervisor.operation:
+        if (supervisor.state not in ('idle', 'error') or supervisor.generation_lock.locked()
+                or evaluations.active or evaluations.preparing or restarting):
+            raise HTTPException(409, 'Unload the model and finish any benchmark before updating an engine.')
+        engine_updater.start(engine_id, STATE, active_preferences())
+    return engine_updater.snapshot()
+
+
+@app.get('/api/settings/comfyui/discover')
+async def discover_comfyui():
+    from .comfyui import docker, reserved_bytes
+    containers, error = [], None
+    try:
+        output = await docker('ps', '-a', '--format', '{{json .}}')
+        for line in output.splitlines():
+            item = json.loads(line)
+            if 'comfy' in (item.get('Names', '') + ' ' + item.get('Image', '')).lower():
+                containers.append(dict(name=item['Names'], state=item.get('State', ''), ports=item.get('Ports', '')))
+    except (OSError, ValueError, RuntimeError) as exc:
+        error = str(exc)
+    endpoint = app_settings.comfy_settings()['url']
+    detected = False
+    try:
+        from .comfyui import local_url
+        async with httpx.AsyncClient(timeout=2, trust_env=False, follow_redirects=False) as client:
+            response = await client.get(local_url(endpoint) + '/system_stats')
+            response.raise_for_status()
+            reserved_bytes(response.json())
+            detected = True
+    except (httpx.HTTPError, ValueError):
+        pass
+    return dict(containers=containers, url=endpoint, detected=detected, docker_error=error)
+
+
+@app.post('/api/settings/restart')
+async def restart_app(background: BackgroundTasks):
+    global restarting
+    async with supervisor.operation:
+        if (engine_updater.active or restarting or supervisor.generation_lock.locked()
+                or supervisor.state in ('loading', 'stopping') or evaluations.active or evaluations.preparing):
+            raise HTTPException(409, 'Finish the current load, request, benchmark, or engine update before restarting.')
+        next_state = preferences_snapshot()
+        # The replacement waits for this process to finish releasing its model and lock.
+        environment = os.environ.copy()
+        for key in ('INFLECT_LISTEN_HOST', 'INFLECT_LAN_NETWORK', 'INFLECT_ALLOWED_HOSTS', 'INFLECT_PUBLIC_URL',
+                    'INFLECT_PORT', 'INFLECT_MODEL_ROOT', 'INFLECT_GGUF_SERVER', 'INFLECT_EXL_PYTHON', 'INFLECT_TABBY'):
+            environment.pop(key, None)
+        environment['INFLECT_CONFIG_FILE'] = str(app_settings.config_path())
+        with (STATE / 'manager.log').open('a') as log:
+            subprocess.Popen([sys.executable, str(PROJECT / 'launch.py'), '--no-browser', '--wait-for-pid', str(os.getpid())],
+                             cwd=PROJECT, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        restarting = True
+    async def shutdown_for_restart():
+        await asyncio.sleep(.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+    background.add_task(shutdown_for_restart)
+    return dict(status='restarting', url=next_state['next_url'])
+
+
 @app.get('/api/library')
 async def library():
     return supervisor.inventory
@@ -583,6 +701,8 @@ async def cancel():
 
 @app.post('/api/quit')
 async def quit_app(background: BackgroundTasks):
+    if engine_updater.active or restarting:
+        raise HTTPException(409, 'Wait for the engine update or restart to finish before quitting.')
     await evaluations.stop()
     await supervisor.stop()
     async def shutdown():

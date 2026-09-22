@@ -107,7 +107,7 @@ def local_url(value):
         port = None
     if (not local or parsed.scheme not in ('http', 'https') or parsed.username or parsed.password
             or parsed.query or parsed.fragment or parsed.path not in ('', '/') or port == 0):
-        raise ValueError('INFLECT_COMFYUI_URL must be a local ComfyUI address, such as http://127.0.0.1:8188.')
+        raise ValueError('Enter a local ComfyUI address, such as http://127.0.0.1:8188.')
     return value.rstrip('/')
 
 
@@ -148,14 +148,14 @@ def queue_busy(queue):
     return bool(queue['queue_running'] or queue['queue_pending'])
 
 
-async def release_comfyui(progress, *, url=None, timeout=120, poll_interval=1):
+async def release_comfyui(progress, *, url=None, container=None, timeout=120, poll_interval=1):
     """Wait for an idle queue, request /free, then observe allocator release.
 
     /free is asynchronous. Require two idle/empty samples after yielding to
     its worker. No queue cancellation, backend shutdown or CUDA reset is used.
     """
     url = local_url(url if url is not None else os.environ.get('INFLECT_COMFYUI_URL', 'http://127.0.0.1:8188'))
-    container = os.environ.get('INFLECT_COMFYUI_CONTAINER')
+    container = os.environ.get('INFLECT_COMFYUI_CONTAINER') if container is None else container
     if container:
         return await stop_managed_comfyui(progress, url, container, timeout=timeout, poll_interval=poll_interval)
     last_message = None

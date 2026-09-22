@@ -6,6 +6,9 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from inflect_access import access_config, lan_interfaces
 
 
 parser = argparse.ArgumentParser(description='Configure which computers can open Inflect.')
@@ -26,27 +29,16 @@ if not isinstance(config, dict):
     raise SystemExit(f'Invalid configuration in {config_file}.')
 
 if args.local:
-    config.update(listen_host='127.0.0.1', allowed_hosts=['127.0.0.1', 'localhost'],
+    config.update(network_enabled=False, listen_host='127.0.0.1', allowed_hosts=['127.0.0.1', 'localhost'],
                   public_url=f"http://127.0.0.1:{int(config.get('port', 7860))}")
     config.pop('lan_network', None)
     message = 'Inflect is now configured for this computer only.'
 else:
-    routes = json.loads(subprocess.check_output(['ip', '-json', 'route', 'show', 'default'], text=True))
-    route = next((item for item in routes if item.get('prefsrc') and item.get('dev')), None)
-    if route is None:
-        raise SystemExit('No default IPv4 LAN route was found.')
-    addresses = json.loads(subprocess.check_output(['ip', '-json', 'address', 'show', 'dev', route['dev']], text=True))
-    info = next((entry for item in addresses for entry in item.get('addr_info', [])
-                 if entry.get('family') == 'inet' and entry.get('local') == route['prefsrc']), None)
-    if info is None:
-        raise SystemExit('The default LAN address could not be matched to its interface.')
-    interface = ipaddress.ip_interface(f"{info['local']}/{info['prefixlen']}")
-    if not interface.ip.is_private or interface.ip.is_loopback or not interface.network.is_private:
-        raise SystemExit('Refusing LAN mode because the default interface is not on a private IPv4 network.')
-    port = int(config.get('port', 7860))
-    config.update(listen_host=str(interface.ip), lan_network=str(interface.network),
-                  allowed_hosts=[str(interface.ip)], public_url=f'http://{interface.ip}:{port}')
-    message = f'Inflect will accept {interface.network} clients at http://{interface.ip}:{port}.'
+    interfaces = lan_interfaces()
+    config.update(network_enabled=True, network_interface='')
+    config.update(access_config(config, interfaces))
+    message = (f"Inflect will accept {config['lan_network']} clients at {config['public_url']}."
+               if config['lan_network'] else 'No private LAN detected. Inflect will stay local until one is available.')
 
 temporary = config_file.with_suffix('.tmp')
 temporary.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')

@@ -7,11 +7,15 @@ import sys
 import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ['INFLECT_STATE'] = tempfile.mkdtemp(prefix='inflect-ui-check-')
+os.environ['INFLECT_CONFIG_FILE'] = str(Path(os.environ['INFLECT_STATE']) / 'config.json')
 os.environ['INFLECT_PORT'] = '7861'
 os.environ['INFLECT_ALLOWED_HOSTS'] = '127.0.0.1,localhost'
 from loader import server
 from loader.engines import Settings
 import uvicorn
+server.MODEL_ROOT = Path(os.environ['INFLECT_STATE'])
+server.lan_interfaces = server.app_settings.lan_interfaces = lambda: [dict(name='test-lan', host='192.168.8.9', subnet='192.168.8.0/24')]
+server.app_settings.write_config(dict(model_root=str(Path(os.environ['INFLECT_STATE'])), comfyui_container='test-comfy', comfyui_enabled=True))
 
 model = dict(id='ui-exl3', path='/test/qwen', name='Qwen3.8-Flash-Next-EXL3', title='Qwen3.8 Flash Next', format='EXL3', quant='4.05 bpw', architecture='qwen', context=262144, vision=True, mtp=True, ngram=True, experts=512, draft_limit=4, bytes=80_000_000_000, issues=[], recommended=True, engines=['exl3'], reasoning=dict(options=['default','off'], toggle=True, levels=[], default_effort=None))
 gguf = {**model, 'id':'ui-gguf','format':'GGUF','quant':'Q4_K_M','engines':['gguf'],'name':'Qwen-GGUF'}
@@ -41,4 +45,4 @@ async def stream(messages,*args,**kwargs):
         server.supervisor.last_usage=metrics
         yield dict(type='complete',**metrics)
 server.supervisor.stream=stream
-uvicorn.run(server.app,host='127.0.0.1',port=7861,lifespan='off')
+uvicorn.run(server.app,host='127.0.0.1',port=7861,lifespan='off',proxy_headers=False)

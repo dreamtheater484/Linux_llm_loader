@@ -4,6 +4,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from inflect_access import access_config
 
 
 parser = argparse.ArgumentParser()
@@ -23,6 +26,7 @@ runtime.mkdir(parents=True, exist_ok=True)
 config_dir.mkdir(parents=True, exist_ok=True)
 applications.mkdir(parents=True, exist_ok=True)
 shutil.copy2(project / 'launch.py', runtime / 'launch.py')
+shutil.copy2(project / 'inflect_access.py', runtime / 'inflect_access.py')
 shutil.copy2(project / 'assets/inflect.svg', runtime / 'inflect.svg')
 config_file = config_dir / 'config.json'
 if not config_file.exists():
@@ -46,6 +50,7 @@ try:
 except (OSError, ValueError):
     existing = {}
 config = {**existing, 'project': str(project), 'runtime': str(runtime), 'model_root': str(model_root), 'port': existing.get('port', 7860)}
+config.update(access_config(config))
 if args.mount_device:
     if not args.mount_device.startswith('/dev/'):
         raise SystemExit('--mount-device must be a device path below /dev/.')

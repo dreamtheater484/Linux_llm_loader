@@ -1,0 +1,2 @@
+# Preserve generated bundles verbatim, including whitespace inside string literals.
+frontend/dist/** linguist-generated=true -whitespace

@@ -1,6 +1,9 @@
 """Small common settings translated to each engine's native launch interface."""
 import math
 import os
+import importlib.metadata
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -11,7 +14,7 @@ from .llama_cpp import runtime_info
 
 PROJECT = Path(__file__).resolve().parents[1]
 RUNTIME = Path(os.environ.get('INFLECT_RUNTIME', Path.home() / '.local/share/linux-llm-loader'))
-EXL_PYTHON = RUNTIME / 'exl3/bin/python'
+EXL_PYTHON = Path(os.environ.get('INFLECT_EXL_PYTHON', RUNTIME / 'exl3/bin/python')).expanduser()
 VLLM = RUNTIME / 'vllm/bin/vllm'
 GGUF = Path(os.environ.get('INFLECT_GGUF_SERVER', RUNTIME / 'llama/bin/llama-server'))
 _configured_tabby = os.environ.get('INFLECT_TABBY')
@@ -57,9 +60,25 @@ class Settings(BaseModel):
         return self
 
 
+@lru_cache(maxsize=8)
+def exl_version(python, tabby, signature):
+    sites = list((Path(python).parent.parent / 'lib').glob('python*/site-packages'))
+    packages = {dist.metadata['Name'].lower(): dist.version for dist in importlib.metadata.distributions(path=sites)}
+    version = packages.get('exllamav3')
+    try:
+        revision = subprocess.check_output(['git', '-C', tabby, 'rev-parse', '--short=8', 'HEAD'], text=True, timeout=3).strip()
+    except (OSError, subprocess.SubprocessError):
+        revision = 'unknown'
+    ready = Path(python).is_file() and (Path(tabby) / 'main.py').is_file() and bool(version)
+    return dict(installed=ready, version=f'{version} / TabbyAPI {revision}' if version else 'Not installed',
+                package_version=version, torch_version=packages.get('torch'), tabby_revision=revision)
+
+
 def engine_inventory():
-    exl_ready = EXL_PYTHON.is_file() and TABBY.is_dir() and any((RUNTIME / 'exl3/lib').glob('python*/site-packages/exllamav3-*.dist-info'))
-    return [dict(id='exl3', name='ExLlamaV3', installed=exl_ready, version='1.5.0 / TabbyAPI 53da7919', formats=['EXL3']),
+    signature = tuple((str(path), path.stat().st_mtime_ns) for path in
+                      [*EXL_PYTHON.parent.parent.glob('lib/python*/site-packages/exllamav3-*.dist-info'),
+                       TABBY / '.git/HEAD', TABBY / '.git/logs/HEAD'] if path.exists())
+    return [dict(id='exl3', name='ExLlamaV3', **exl_version(str(EXL_PYTHON), str(TABBY), signature), formats=['EXL3']),
             dict(id='vllm', name='vLLM', installed=VLLM.is_file(), version='Not installed' if not VLLM.is_file() else 'Local runtime', formats=['Safetensors']),
             dict(id='gguf', name='llama.cpp', formats=['GGUF'], **runtime_info(GGUF))]
 

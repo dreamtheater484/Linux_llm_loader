@@ -25,6 +25,20 @@ The Windows-only PowerShell integration test is skipped on Linux. Local HTTP tra
 
 The manager environment also runs the app tests. To run the entire suite there, install the development-only `pytest`, `filelock`, and `huggingface-hub` dependencies in a separate test environment or target directory; they are used by the downloader tests, not by benchmark inference.
 
+## Settings and LAN acceptance
+
+`tests/test_app_settings.py` covers private-LAN defaults and fail-closed discovery, opt-out persistence, configuration validation and file permissions, concurrent edits, ComfyUI skipping, engine version detection, update admission, and successful/failed installer activation with synthetic subprocesses. `tests/test_comfyui.py` also checks cancellation and restoration around model loads.
+
+Build the frontend, run `tests/serve_chat_fixture.py` using the manager Python, and run `node frontend/tests/settings-browser.cjs`. Set `PLAYWRIGHT_MODULE` to your Playwright package if it is not installed in the frontend. This fixture has its own configuration and chat data. The browser test checks settings navigation, reload persistence, invalid input, model controls, engine version cards, and a narrow-screen layout. `frontend/tests/chat-browser.cjs` covers the separate chat regressions. Never point these destructive fixture tests at a real chat database.
+
+For live acceptance, with no request or benchmark active:
+
+1. Save Network off, restart from Settings, and verify the previous LAN socket is closed and localhost works.
+2. Save Network on, restart, and verify the displayed LAN address and exact allowed subnet. Cross-origin requests must fail; a forged forwarding header must not change the source address the launcher trusts.
+3. Confirm the previous ComfyUI preference is retained. Load a model with integration enabled; verify the named container is restored after startup.
+4. Check that the loaded model's settings match the original profile after restoring it.
+5. Engine update tests do not replace clean-machine installation qualification. Test new supported runtime locks on a spare installation before publishing them; custom engine paths must never be overwritten by the managed updater.
+
 ## Coding benchmark verification
 
 `tests/test_benchmarks.py` covers frozen configurations, secret removal, all settings in Markdown, ZIP contents, database pagination/search, cancellation before and during work, partial-answer preservation, hard run deadlines, restart recovery, changed-asset rejection, concurrent-run protection, export routes, and subprocess timeout/output limits. These tests use synthetic results and do not exercise Docker.

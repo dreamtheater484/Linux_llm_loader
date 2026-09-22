@@ -9,10 +9,11 @@ import sys
 import time
 import urllib.request
 import webbrowser
+from inflect_access import access_config, private_lan
 
 CONFIG_HOME = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
 DATA_HOME = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share'))
-CONFIG_FILE = CONFIG_HOME / 'inflect/config.json'
+CONFIG_FILE = Path(os.environ.get('INFLECT_CONFIG_FILE', CONFIG_HOME / 'inflect/config.json'))
 
 
 def read_config():
@@ -47,14 +48,16 @@ def read_config():
 
 
 CONFIG = read_config()
+# A saved LAN preference follows DHCP changes. No private interface means local-only.
+ACCESS = access_config(CONFIG)
 SOURCE_PROJECT = Path(__file__).resolve().parent
 PROJECT = Path(os.environ.get('INFLECT_PROJECT', CONFIG.get('project', SOURCE_PROJECT))).expanduser()
 RUNTIME = Path(os.environ.get('INFLECT_RUNTIME', CONFIG.get('runtime', DATA_HOME / 'linux-llm-loader'))).expanduser()
 MODEL_ROOT = Path(os.environ.get('INFLECT_MODEL_ROOT', CONFIG.get('model_root', Path.home() / 'models'))).expanduser()
 PORT = int(os.environ.get('INFLECT_PORT', CONFIG.get('port', 7860)))
-LISTEN_HOST = os.environ.get('INFLECT_LISTEN_HOST', CONFIG.get('listen_host', '127.0.0.1'))
-LAN_NETWORK = os.environ.get('INFLECT_LAN_NETWORK', CONFIG.get('lan_network', ''))
-PUBLIC_URL = os.environ.get('INFLECT_PUBLIC_URL', CONFIG.get('public_url', f'http://{LISTEN_HOST}:{PORT}'))
+LISTEN_HOST = os.environ.get('INFLECT_LISTEN_HOST', ACCESS['listen_host'])
+LAN_NETWORK = os.environ.get('INFLECT_LAN_NETWORK', ACCESS['lan_network'])
+PUBLIC_URL = os.environ.get('INFLECT_PUBLIC_URL', f'http://{LISTEN_HOST}:{PORT}')
 PROBE_URL = f'http://{LISTEN_HOST}:{PORT}'
 
 
@@ -67,12 +70,19 @@ def ready():
 
 
 def main():
+    if '--wait-for-pid' in sys.argv:
+        old_pid = int(sys.argv[sys.argv.index('--wait-for-pid') + 1])
+        for _ in range(180):
+            try:
+                os.kill(old_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError('The previous Inflect process has not stopped; restart was cancelled.')
     listen_ip = ipaddress.ip_address(LISTEN_HOST)
-    if not (listen_ip.is_loopback or listen_ip.is_private):
-        raise RuntimeError('Inflect refuses to listen on a public IP address.')
     if not listen_ip.is_loopback:
-        network = ipaddress.ip_network(LAN_NETWORK, strict=False) if LAN_NETWORK else None
-        if network is None or listen_ip not in network or not network.is_private:
+        if not private_lan(LISTEN_HOST, LAN_NETWORK):
             raise RuntimeError('LAN mode needs a private INFLECT_LAN_NETWORK containing the listen address.')
     if not PROJECT.is_dir():
         mount_device = os.environ.get('INFLECT_MOUNT_DEVICE', CONFIG.get('mount_device'))
@@ -93,10 +103,13 @@ def main():
             environment.update(INFLECT_PROJECT=str(PROJECT), INFLECT_RUNTIME=str(RUNTIME),
                                INFLECT_MODEL_ROOT=str(MODEL_ROOT), INFLECT_PORT=str(PORT),
                                INFLECT_LISTEN_HOST=LISTEN_HOST, INFLECT_LAN_NETWORK=LAN_NETWORK,
-                               INFLECT_ALLOWED_HOSTS=','.join(CONFIG.get('allowed_hosts', [])))
-            if CONFIG.get('comfyui_container') and 'INFLECT_COMFYUI_CONTAINER' not in environment:
-                environment['INFLECT_COMFYUI_CONTAINER'] = CONFIG['comfyui_container']
-            process = subprocess.Popen([str(python), '-m', 'uvicorn', 'loader.server:app', '--host', LISTEN_HOST, '--port', str(PORT)],
+                               INFLECT_CONFIG_FILE=str(CONFIG_FILE),
+                               INFLECT_ALLOWED_HOSTS=','.join(set(ACCESS['allowed_hosts']) | {LISTEN_HOST}))
+            for key, variable in (('gguf_server', 'INFLECT_GGUF_SERVER'), ('exl_python', 'INFLECT_EXL_PYTHON'),
+                                  ('tabby_dir', 'INFLECT_TABBY')):
+                if CONFIG.get(key) and variable not in environment:
+                    environment[variable] = CONFIG[key]
+            process = subprocess.Popen([str(python), '-m', 'uvicorn', 'loader.server:app', '--host', LISTEN_HOST, '--port', str(PORT), '--no-proxy-headers'],
                 cwd=PROJECT, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         for _ in range(120):
             if ready():

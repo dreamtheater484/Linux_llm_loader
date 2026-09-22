@@ -13,7 +13,7 @@ Inflect saves conversations, messages, reasoning, drafts and attachments on this
 - **Conversation options** contains rename (also click the title), chat instructions, JSON export/import, and permanent deletion. Inflect exports include attachment bytes; imports upload files individually so large histories do not depend on a single huge API request. Generic JSON with a `messages` list is also accepted for text conversations.
 - Attach text, source code, HTML, SVG, Markdown, PDFs, PNG/JPEG/WebP/GIF images, and MP3/WAV audio. Files are limited to 12 MB each, 20 per message and 200 per conversation. PDFs support up to 250 pages and 2 million extracted characters. Text and PDF text use either inference engine. GIF images are converted to PNG for vision input. SVG source is sent as text. Images require a loaded vision model; audio playback is supported, but model input requires a transcript because neither installed engine has a qualified audio path. Scanned PDFs need page images or external OCR.
 - Code blocks have copy, download and preview controls. The resizable preview panel supports HTML with inline CSS/JavaScript, SVG, Markdown, source/text, images, paged PDFs and audio. HTML and SVG run in a sandbox with no parent-page access and no external connections. Self-contained files work offline; remote scripts, fonts and images are intentionally blocked. Source and rendered views are available together with expand, restart and download controls.
-- **Maximize chat** expands the workspace across the window. A compact top strip retains GPU/CPU power, VRAM, model RAM, CPU load, prompt speed, decode speed and first-token latency. Model settings open as a drawer; **Restore dashboard** returns to the regular layout.
+- **Maximize chat** expands the workspace across the window. A compact top strip retains GPU/CPU power, VRAM, model RAM, CPU load, prompt speed, decode speed and first-token latency. **Model settings** opens Settings → Model setup; **Back to chat** returns to the same conversation and layout.
 
 **Permanent deletion:** there is no chat trash or undo. Deleting removes the conversation, draft, attachments and generated previews from the app. SQLite secure deletion scrubs freed database cells and the database uses delete-mode journals, not a retained WAL. If the conversation contains an assistant reply and an engine is loaded, Inflect unloads its owned engine process to release prompt/KV caches. The dialog explains this before deletion. Other active requests must finish first. Open app windows receive a deletion notification. Independent branches, downloaded exports, external backups and SSD-level forensic remnants are outside this guarantee.
 
@@ -99,17 +99,33 @@ Open **Inflect** from Ubuntu's application menu, or run:
 ./launch.sh
 ```
 
-The interface opens at `http://127.0.0.1:7860`. Inflect starts in computer-only mode. Its inference engine always remains bound to loopback.
+New installations enable LAN access by default when a directly connected private IPv4 LAN is detected. The launcher opens the detected address, shown in **Settings → Network**. Without a suitable LAN, Inflect stays at `http://127.0.0.1:7860`. Existing explicit computer-only choices are preserved. Inference engines always remain bound to loopback.
 
-## Optional private-LAN access
+## Settings
 
-To let phones, tablets, or other computers on the directly connected private network open Inflect:
+The Settings page groups application controls into five sections:
+
+- **Network:** allow LAN access (default on), copy the address, and optionally choose a detected interface or port. Switch off for this computer only.
+- **Engines:** detected llama.cpp executable, ExLlama Python environment, and TabbyAPI folder; actual installed versions and the supported versions shipped with this checkout. Custom paths are editable under **Change engine locations**.
+- **Model setup:** engine choice, context, cache precision, vision, prediction acceleration, thinking, output length, and advanced CPU/memory/sampling controls. Settings stay tied to the selected model and can be saved as profiles.
+- **Model library:** model folder, rescan, and read-only locations for application data and runtimes.
+- **ComfyUI:** enable/disable GPU sharing, choose container stop/restart or API cache unloading, and detect the local service/container. Existing configured container integrations stay enabled; new installations leave this optional integration off. Disabling it skips all ComfyUI checks during model loading. A container already stopped by an ongoing load is still restored.
+
+Application edits have **Save changes** and **Discard** controls. Network, model-folder, and engine-location changes require **Restart Inflect**; the page shows the next address and explains that the current model will unload. ComfyUI changes apply to the next load. Conflicting edits from another window are rejected instead of silently overwritten.
+
+**Engine updates** are explicit, supported-version updates, not automatic tracking of upstream releases. Inflect compares installed versions with its checked-in runtime locks. If needed, **Use supported version** installs the compatible runtime; unload the model first. llama.cpp validates downloads and switches its runtime link only after checks pass. ExLlama prepares a separate environment with matching PyTorch/CUDA, pinned TabbyAPI and Inflect patches; the old installation stays intact, and the new paths activate after restarting. Custom installations are reported as externally managed. Refreshing versions does not download or install anything, and Inflect never updates the system GPU driver.
+
+## Private-LAN access
+
+Open **Settings → Network**, turn **Allow network access** on or off, save, and use **Restart Inflect** when shown. Other devices use the displayed LAN address. Automatic interface selection follows DHCP address changes when the launcher starts; if the selected interface is unavailable, it falls back to loopback.
+
+For a terminal-based alternative:
 
 ```bash
 python3 scripts/configure-access.py --lan
 ```
 
-Quit and reopen Inflect. The command prints the private URL to use on other devices. LAN mode binds the GUI to the detected private IPv4 address and accepts clients only from that exact subnet. Requests from public internet addresses are rejected even if a router is accidentally configured to forward the port. No inference-engine port or temporary engine key is exposed.
+Quit and reopen Inflect. The command prints the private URL to use on other devices. LAN mode binds the GUI to the detected RFC1918 private IPv4 address and accepts clients only from that subnet. It never binds a wildcard/public address. The launcher disables proxy-header trust, and the server checks the client address, Host, Origin and custom mutation header. No inference-engine port or temporary engine key is exposed. Do not configure router forwarding or a reverse proxy: a proxy that hides an outside client's address as a trusted LAN address defeats source-address filtering.
 
 Every trusted device on that subnet can use the GUI; Inflect does not provide individual user accounts. Avoid LAN mode on guest, hotel, university, or other untrusted shared networks.
 
@@ -119,7 +135,7 @@ Return to computer-only access with:
 python3 scripts/configure-access.py --local
 ```
 
-Quit and reopen Inflect again to apply the change. A changing DHCP address may also require rerunning `--lan`.
+Quit and reopen Inflect again to apply the change. If a host firewall blocks LAN access, allow only the selected subnet and GUI port; do not open it to all sources.
 
 ## External model drive
 
@@ -174,11 +190,11 @@ Profile speed uses matching effective engine and generation settings. Results fo
 
 The conversation follows new output automatically. Scrolling away pauses tail following; **Jump to latest** resumes it. Closing the browser tab leaves the local server running. **Unload model** frees model RAM and VRAM. **Quit Inflect** stops the server.
 
-Before every model load or reload, Inflect releases the previous LLM and prepares ComfyUI. For a Docker deployment, set `comfyui_container` in `~/.config/inflect/config.json` (or `INFLECT_COMFYUI_CONTAINER`) to the explicit ComfyUI backend container name. Inflect waits for its queue to become idle, stops that container, confirms it has stopped, then launches the LLM. Once loading finishes, fails, or is cancelled, Inflect restarts ComfyUI if it was running before and waits for its API to return. An already stopped ComfyUI stays stopped. Docker commands use the inspected container ID, have bounded timeouts, and cancellation waits for an in-flight stop before restoring the service. No workflow files or saved outputs are deleted. A busy queue is preserved; it times out with a specific message instead of being cancelled. Avoid submitting new ComfyUI work during a model switch.
+Before every model load or reload, Inflect releases the previous LLM. When enabled in **Settings → ComfyUI**, it also prepares ComfyUI. Choose container stop/restart and select the detected ComfyUI container, or enter its exact name. Inflect waits for its queue to become idle, stops that container, confirms it has stopped, then launches the LLM. Once loading finishes, fails, or is cancelled, Inflect restarts ComfyUI if it was running before and waits for its API to return. An already stopped ComfyUI stays stopped. Docker commands use the inspected container ID, have bounded timeouts, and cancellation waits for an in-flight stop before restoring the service. No workflow files or saved outputs are deleted. A busy queue is preserved; it times out with a specific message instead of being cancelled. Avoid submitting new ComfyUI work during a model switch.
 
-The local installation uses `pi-ubuntu-comfy`. This managed lifecycle replaces the allocator-zero check: ComfyUI can retain small CUDA allocations after a successful `/free`, so zero bytes is not a reliable completion requirement. The load banner shows stop, model load, and restart stages. ComfyUI's empty backend may allocate its CUDA context again after restart; a new image workflow can also use VRAM again.
+Container mode replaces the allocator-zero check: ComfyUI can retain small CUDA allocations after a successful `/free`, so zero bytes is not a reliable completion requirement. The load banner shows stop, model load, and restart stages. ComfyUI's empty backend may allocate its CUDA context again after restart; a new image workflow can also use VRAM again.
 
-The ComfyUI API address defaults to `http://127.0.0.1:8188`; override it with `INFLECT_COMFYUI_URL` using a loopback address. Without an explicitly configured container, the portable API-only mode still requests `/free` and checks the queue/allocator. It cannot conclusively confirm release when the allocator retains memory; its error advises managed container cleanup rather than incorrectly blaming queued jobs. A refused connection in API-only mode is skipped. Managed mode requires Docker CLI access for the Inflect user and never guesses which container to stop.
+The ComfyUI API address defaults to `http://127.0.0.1:8188`; change it in Settings using a loopback address. When enabled in API mode, Inflect requests `/free` and checks the queue/allocator. It cannot conclusively confirm release when the allocator retains memory; its error advises managed container cleanup rather than incorrectly blaming queued jobs. A refused connection in API-only mode is skipped. Managed mode requires Docker CLI access for the Inflect user and never guesses which container to stop.
 
 ## Coding benchmarks
 
@@ -301,7 +317,7 @@ This checks schema visibility, streaming and non-streaming calls, reasoning off/
 | Desktop shortcut | `~/.local/share/applications/inflect.desktop` |
 | Model files | The directory supplied with `--model-dir` |
 
-Machine configuration, logs, profiles, benchmark results, CUDA reports, model files, credentials, `.env` files, and private keys are excluded from Git. Internal engine keys are generated for each run, stored with owner-only permissions, and removed from displayed logs. Chat content remains in browser memory and is cleared when the page reloads.
+Machine configuration, logs, profiles, benchmark results, CUDA reports, model files, credentials, `.env` files, and private keys are excluded from Git. Internal engine keys are generated for each run, stored with owner-only permissions, and removed from displayed logs. Chats, drafts and attachments persist in the local conversation database until explicitly deleted.
 
 ## Configuration and moving files
 
@@ -315,7 +331,7 @@ Useful options:
 ./scripts/setup-ubuntu.sh --model-dir "/path/to/models" --no-desktop
 ```
 
-The launcher also accepts these environment overrides: `INFLECT_PROJECT`, `INFLECT_RUNTIME`, `INFLECT_MODEL_ROOT`, `INFLECT_PORT`, `INFLECT_LISTEN_HOST`, `INFLECT_LAN_NETWORK`, `INFLECT_PUBLIC_URL`, `INFLECT_MOUNT_DEVICE`, `INFLECT_STATE`, `INFLECT_TABBY`, and `INFLECT_GGUF_SERVER`.
+The launcher also accepts these environment overrides: `INFLECT_PROJECT`, `INFLECT_RUNTIME`, `INFLECT_MODEL_ROOT`, `INFLECT_PORT`, `INFLECT_LISTEN_HOST`, `INFLECT_LAN_NETWORK`, `INFLECT_PUBLIC_URL`, `INFLECT_MOUNT_DEVICE`, `INFLECT_STATE`, `INFLECT_TABBY`, `INFLECT_EXL_PYTHON`, `INFLECT_GGUF_SERVER`, and `INFLECT_CONFIG_FILE`. The settings-page restart applies saved preferences rather than inherited path/network overrides.
 
 ## Troubleshooting
 
@@ -325,7 +341,7 @@ The launcher also accepts these environment overrides: `INFLECT_PROJECT`, `INFLE
 - **First response is slow:** GPU kernels can compile on first use. Compare sustained performance over several requests.
 - **External drive moved:** rerun setup with the new `--model-dir` and optional `--mount-device` values.
 - **Port 7860 is occupied:** stop the other service or set a different `INFLECT_PORT` before launching.
-- **LAN URL stopped working:** the private DHCP address probably changed; rerun `python3 scripts/configure-access.py --lan` and restart Inflect.
+- **LAN URL stopped working:** reopen Inflect on its host computer and copy the current address from Settings → Network. Automatic detection follows DHCP when the launcher starts.
 - **Full disk:** the private runtime uses about 10 GiB before caches. Models are stored separately and are not deleted by Inflect.
 
 ## Validation and development
