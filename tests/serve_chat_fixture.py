@@ -17,13 +17,28 @@ server.MODEL_ROOT = Path(os.environ['INFLECT_STATE'])
 server.lan_interfaces = server.app_settings.lan_interfaces = lambda: [dict(name='test-lan', host='192.168.8.9', subnet='192.168.8.0/24')]
 server.app_settings.write_config(dict(model_root=str(Path(os.environ['INFLECT_STATE'])), comfyui_container='test-comfy', comfyui_enabled=True))
 
-model = dict(id='ui-exl3', path='/test/qwen', name='Qwen3.8-Flash-Next-EXL3', title='Qwen3.8 Flash Next', format='EXL3', quant='4.05 bpw', architecture='qwen', context=262144, vision=True, mtp=True, ngram=True, experts=512, draft_limit=4, bytes=80_000_000_000, issues=[], recommended=True, engines=['exl3'], reasoning=dict(options=['default','off'], toggle=True, levels=[], default_effort=None))
-gguf = {**model, 'id':'ui-gguf','format':'GGUF','quant':'Q4_K_M','engines':['gguf'],'name':'Qwen-GGUF'}
-server.supervisor.inventory = dict(models=[model,gguf], errors=[], root='/test/models')
+model = dict(family='Qwen3.8-Flash-Next', variant='', expert_bytes=58_000_000_000, id='ui-exl3', path='/test/qwen', name='Qwen3.8-Flash-Next-EXL3', title='Qwen3.8 Flash Next', format='EXL3', quant='4.05 bpw', architecture='qwen', context=262144, vision=True, mtp=True, ngram=True, experts=512, draft_limit=4, bytes=80_000_000_000, issues=[], recommended=True, engines=['exl3'], reasoning=dict(options=['default','off'], toggle=True, levels=[], default_effort=None))
+gguf = {**model, 'id':'ui-gguf','format':'GGUF','quant':'Q4_K_M','engines':['gguf'],'name':'Qwen3.8-Flash-Next-Q4_K_M','bytes':111_000_000_000,'expert_bytes':80_000_000_000,'mtp':False,'ngram':False}
+dense = dict(model, id='ui-dense', family='Qwen3.6-27B', variant='', name='Qwen3.6-27B-Q6_K', title='Qwen3.6 27B Q6_K', format='GGUF', quant='Q6_K', engines=['gguf'], bytes=22_500_000_000, expert_bytes=0, experts=0, context=262144, ngram=False, source='unsloth/Qwen3.6-27B-GGUF', recommended=False)
+dense2 = dict(dense, id='ui-dense-q4', name='Qwen3.6-27B-Uncensored-Heretic-Q4_K_M', variant='Uncensored Heretic', quant='Q4_K_M', bytes=16_800_000_000, source=None)
+moe = dict(model, id='ui-moe', family='Qwen3.6-35B-A3B', variant='', name='Qwen3.6-35B-A3B-UD-Q4_K_M', title='Qwen3.6 35B A3B', format='GGUF', quant='UD-Q4_K_M', engines=['gguf'], bytes=22_100_000_000, expert_bytes=19_500_000_000, experts=256, active_b=3.0, mtp=False, ngram=False, recommended=False)
+deep = dict(model, id='ui-deep', family='DeepSeek-V4-Flash-0731', variant='', name='DeepSeek-V4-Flash-0731-EXL3-3.04bpw', title='DeepSeek V4 Flash 0731', quant='3.04 bpw', bytes=117_000_000_000, expert_bytes=111_000_000_000, experts=256, context=1048576, vision=False, ngram=False)
+small = dict(dense, id='ui-small', family='gemma-4-E4B', variant='it qat', name='gemma-4-E4B-it-qat-UD-Q4_K_XL', title='gemma 4 E4B it qat', quant='UD-Q4_K_XL', bytes=4_200_000_000, context=131072, vision=False, mtp=False, source=None)
+server.supervisor.inventory = dict(models=[model,gguf,dense,dense2,moe,deep,small], errors=[], root='/test/models', locations=['/media/archive/old-models'], revision=1)
+base = Settings(model_id='ui-dense', context=131072, max_output=32768, chunk_size=4096, vision=True, prediction='mtp', cpu_percent=0, temperature=1).model_dump()
+(Path(os.environ['INFLECT_STATE'])/'profiles.json').write_text(json.dumps([
+  dict(id='p1', name='auto', auto_name=True, settings=base, updated_at=1),
+  dict(id='p2', name='Long documents', auto_name=False, settings={**base, 'context': 262144, 'kv': 'Q4', 'max_output': 16384}, updated_at=2),
+  dict(id='p3', name='auto', auto_name=True, settings={**base, 'draft_tokens': 3, 'reasoning_effort': 'off', 'temperature': 0.6}, updated_at=3),
+  dict(id='p4', name='Flash everyday', auto_name=False, settings=Settings(model_id='ui-exl3', context=262144, max_output=32768, vision=True, prediction='mtp', cpu_percent=60, chunk_size=4096).model_dump(), updated_at=4)]))
+from loader.downloads import DownloadManager
+server.downloads = DownloadManager(Path(os.environ['INFLECT_STATE']), Path(os.environ['INFLECT_STATE'])/'library', server.download_finished)
+server.MODEL_ROOT = Path(os.environ['INFLECT_STATE'])/'library'
+server.MODEL_ROOT.mkdir(exist_ok=True)
 server.supervisor.model = model
 server.supervisor.engine = 'exl3'
 server.supervisor.state = 'ready'
-server.supervisor.settings = Settings(model_id='ui-exl3', context=262144, max_output=4096, vision=True)
+server.supervisor.settings = Settings(**{**json.loads((Path(os.environ['INFLECT_STATE'])/'profiles.json').read_text())[3]['settings']})
 server.engine_inventory = lambda: [dict(id='exl3',name='ExLlamaV3',installed=True),dict(id='gguf',name='llama.cpp',installed=True)]
 server.telemetry.value = dict(cpu_percent=13,cpu_count=16,cpu_power=dict(watts=34.7),gpu=dict(power_watts=79,power_limit_watts=525,temperature_c=41,used_bytes=28*2**30,total_bytes=32*2**30,name='NVIDIA GeForce RTX 5090'),ram=dict(accounting='physical_including_cache_v1',used_bytes=90*2**30,total_bytes=192*2**30,available_bytes=95*2**30,free_bytes=90*2**30,cache_bytes=20*2**30),model_memory=dict(resident_bytes=69*2**30,file_bytes=15*2**30))
 async def stream(messages,*args,**kwargs):

@@ -6,6 +6,7 @@ import re
 import struct
 
 from .reasoning import inspect_reasoning, native_reasoning
+from .naming import active_billions, split_name
 
 
 def read_json(path):
@@ -19,8 +20,11 @@ def within(root, name):
     return path
 
 
-def gguf_metadata(path):
-    """Read selected GGUF fields, skipping token arrays and tensor payloads."""
+def gguf_metadata(path, tensors=False):
+    """Read selected GGUF fields, skipping token arrays and tensor payloads.
+
+    With tensors=True, also sum the bytes of routed-expert tensors from the
+    tensor directory, so memory placement can be estimated before loading."""
     file_size = path.stat().st_size
     with path.open('rb') as f:
         def unpack(fmt):
@@ -60,18 +64,50 @@ def gguf_metadata(path):
 
         if f.read(4) != b'GGUF' or unpack('<I') not in (2, 3):
             raise ValueError('Invalid GGUF header')
-        unpack('<Q')
+        tensor_count = unpack('<Q')
         count = unpack('<Q')
         if count > 1_000_000:
             raise ValueError('Oversized GGUF header')
         result = {}
         for _ in range(count):
             key = string()
-            keep = key in ('general.architecture', 'general.name', 'general.type', 'split.count', 'split.no', 'tokenizer.chat_template') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count', '.expert_count', '.ple.ngram_size', '.ngram_size'))
+            keep = key in ('general.architecture', 'general.name', 'general.type', 'general.alignment', 'split.count', 'split.no', 'tokenizer.chat_template') or key.endswith(('.context_length', '.nextn_predict_layers', '.block_count', '.expert_count', '.ple.ngram_size', '.ngram_size'))
             result_value = value(unpack('<I'), keep)
             if keep:
                 result[key] = result_value
+        if tensors and tensor_count < 1_000_000:
+            entries = []
+            for _ in range(tensor_count):
+                name = string()
+                dims = unpack('<I')
+                if dims > 8:
+                    raise ValueError('Invalid GGUF tensor shape')
+                f.seek(8 * dims + 4, 1)
+                entries.append((unpack('<Q'), name))
+            alignment = int(result.get('general.alignment') or 32)
+            start = -(-f.tell() // alignment) * alignment
+            entries.sort()
+            ends = [offset for offset, _ in entries[1:]] + [file_size - start]
+            result['_tensor_bytes'] = max(0, file_size - start)
+            result['_expert_bytes'] = sum(max(0, end - offset) for (offset, name), end in zip(entries, ends) if '_exps' in name)
     return result
+
+
+def safetensors_expert_bytes(weights):
+    """Bytes held by routed experts, read from safetensors headers only."""
+    total = 0
+    for weight in weights:
+        with weight.open('rb') as f:
+            size_data = f.read(8)
+            if len(size_data) != 8:
+                continue
+            size = struct.unpack('<Q', size_data)[0]
+            if size > 64_000_000:
+                continue
+            header = json.loads(f.read(size))
+        total += sum(v['data_offsets'][1] - v['data_offsets'][0] for k, v in header.items()
+                     if k != '__metadata__' and '.experts.' in k)
+    return total
 
 
 def gguf_quant(name):
@@ -152,12 +188,16 @@ def native_model(path, root):
     for receipt_path in (root / '.linux-llm-downloads').glob('*.json'):
         candidate = read_json(receipt_path)
         if candidate.get('folder') == path.name:
-            receipt = {k: candidate.get(k) for k in ('status', 'commit', 'verified_utc')}
+            receipt = {k: candidate.get(k) for k in ('status', 'commit', 'verified_utc', 'repo', 'revision')}
             for item in candidate.get('files', []):
                 p = within(path, item['name'])
                 if not p.is_file() or p.stat().st_size != item['size']:
                     issues.append('Receipt mismatch: ' + item['name'])
             break
+    try:
+        expert_bytes = safetensors_expert_bytes(weights) if text.get('num_experts', text.get('n_routed_experts', 0)) else 0
+    except (OSError, ValueError, KeyError, TypeError):
+        expert_bytes = 0
     return dict(path=str(path), name=path.name, format='EXL3' if method == 'exl3' else 'Safetensors',
                 quant=quant_label, architecture=architecture, reasoning=native_reasoning(path, method == 'exl3'),
                 context=text.get('max_position_embeddings', 4096), vision=vision, mtp=mtp,
@@ -165,32 +205,72 @@ def native_model(path, root):
                 experts=text.get('num_experts', text.get('n_routed_experts', 0)),
                 layers=text.get('num_hidden_layers', 0), ngram=bool(text.get('ngram_size')),
                 bytes=sum(p.stat().st_size for p in weights), issues=list(dict.fromkeys(issues)),
-                receipt=receipt, projector=None,
+                receipt=receipt, projector=None, expert_bytes=expert_bytes,
                 recommended=method == 'exl3' and any(s in path.name for s in ['Flash-Next', 'Flash-0731', 'Vision-Exp']),
                 engines=['exl3'] if method == 'exl3' else ['vllm'])
 
 
-def scan(root):
-    root = Path(root).resolve()
-    if not root.is_dir():
-        raise ValueError('Model folder is unavailable. Mount the model drive and refresh.')
-    models = []
-    errors = []
+def read_receipts(root):
+    receipts = {}
+    for receipt_path in (root / '.linux-llm-downloads').glob('*.json'):
+        try:
+            candidate = read_json(receipt_path)
+        except (OSError, ValueError):
+            continue
+        if isinstance(candidate, dict) and candidate.get('folder'):
+            receipts[candidate['folder']] = {k: candidate.get(k) for k in ('status', 'commit', 'verified_utc', 'repo', 'revision')}
+    return receipts
+
+
+def folder_projector(path):
+    """A downloaded model keeps its own folder: pair its single projector."""
+    models = [p for p in path.parent.glob('*.gguf') if 'mmproj' not in p.name.lower()
+              and not re.search(r'-(?!00001)\d{5}-of-\d{5}\.gguf$', p.name)]
+    projectors = sorted(path.parent.glob('*mmproj*.gguf'))
+    if len(models) == 1 and projectors:
+        preferred = [p for p in projectors if re.search(r'(?i)(?:^|[-_.])f16', p.name)] or projectors
+        return str(preferred[0])
+    return None
+
+
+def walk(base):
     # A bounded walk covers the library and nested quant folders, excluding Hub caches.
-    dirs = [root]
+    dirs = [base]
     for _ in range(3):
         dirs += [p for parent in list(dirs) for p in parent.iterdir()
                  if p.is_dir() and not p.name.startswith('.') and p.name not in ('hub', 'xet')
                  and p not in dirs]
         dirs = list(dict.fromkeys(dirs))
+    return dirs
+
+
+def scan(root, extra=()):
+    root = Path(root).resolve()
+    if not root.is_dir():
+        raise ValueError('Model folder is unavailable. Mount the model drive and refresh.')
+    models = []
+    errors = []
+    receipts = read_receipts(root)
+    dirs = walk(root)
+    locations = {}
+    for location in extra:
+        location = Path(location).expanduser()
+        if location.is_file() and location.suffix.lower() == '.gguf':
+            dirs.append(location)
+        elif location.is_dir():
+            dirs += walk(location.resolve())
+        else:
+            errors.append(f'{location}: this added location is unavailable. Reconnect its drive or remove it from the library.')
+        locations[str(location)] = True
+    dirs = list(dict.fromkeys(dirs))
     for directory in dirs:
-        if (directory / 'config.json').is_file():
+        if directory.is_dir() and (directory / 'config.json').is_file():
             try:
                 models.append(native_model(directory, root))
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 errors.append(f'{directory.name}: {exc}')
     for directory in dirs:
-        for path in directory.glob('*.gguf'):
+        for path in ([directory] if directory.is_file() else directory.glob('*.gguf')):
             lower = path.name.lower()
             if any(s in lower for s in ('mmproj', 'drafter', 'dspark', 'fastmtp')) or lower.startswith('mtp-'):
                 continue
@@ -198,13 +278,20 @@ def scan(root):
             if match and int(match[1]) != 1:
                 continue
             try:
-                meta = gguf_metadata(path)
+                meta = gguf_metadata(path, tensors=True)
                 if meta.get('general.type') in ('mmproj', 'adapter'):
                     continue
                 shards = [path] if not match else [path.with_name(path.name[:match.start()] + f'-{i:05d}-of-{int(match[2]):05d}.gguf') for i in range(1, int(match[2]) + 1)]
                 issues = ['Missing shard: ' + p.name for p in shards if not p.is_file()]
+                expert_bytes = meta.get('_expert_bytes', 0)
+                for shard in shards[1:]:
+                    if shard.is_file():
+                        try:
+                            expert_bytes += gguf_metadata(shard, tensors=True).get('_expert_bytes', 0)
+                        except (OSError, ValueError, struct.error):
+                            pass
                 arch = meta.get('general.architecture', 'unknown')
-                projector = gguf_projector(path, root)
+                projector = gguf_projector(path, root) or folder_projector(path)
                 # Retain explicitly known legacy projector pairs too.
                 if not projector:
                     for tag, filename in [('DeepSeek-V4-Flash-Vision-Exp', 'mmproj-DeepSeek-V4-Flash-Vision-Exp-Q8_0.gguf'), ('GLM-5.3-Flash', 'mmproj-zai-org.GLM-5.3-Flash.f16.gguf')]:
@@ -213,6 +300,7 @@ def scan(root):
                 nextn = int(meta.get(arch + '.nextn_predict_layers', 0))
                 mtp = nextn > 0 and arch in ('qwen35', 'qwen35moe')
                 template = meta.get('tokenizer.chat_template', '')
+                receipt = receipts.get(path.parent.name) if path.parent != root else None
                 models.append(dict(path=str(path), name=path.name[:match.start()] if match else path.stem,
                     format='GGUF', quant=gguf_quant(path.name[:match.start()] if match else path.stem),
                     architecture=arch, context=meta.get(arch + '.context_length', 4096), reasoning=inspect_reasoning(template),
@@ -223,11 +311,21 @@ def scan(root):
                     draft_limit=4, nextn_layers=nextn,
                     ngram=bool(meta.get(arch + '.ple.ngram_size') or meta.get(arch + '.ngram_size')),
                     bytes=sum(p.stat().st_size for p in shards if p.is_file()), issues=issues,
-                    receipt=None, projector=projector, recommended=False, engines=['gguf']))
+                    receipt=receipt, projector=projector, recommended=False, engines=['gguf'],
+                    expert_bytes=expert_bytes))
             except (OSError, ValueError, KeyError, struct.error) as exc:
                 errors.append(f'{path.name}: {exc}')
     for model in models:
-        model['id'] = hashlib.sha256(str(Path(model['path']).relative_to(root)).encode()).hexdigest()[:16]
+        path = Path(model['path'])
+        inside = path.is_relative_to(root)
+        model['id'] = hashlib.sha256(str(path.relative_to(root) if inside else path).encode()).hexdigest()[:16]
         model['title'] = re.sub(r'[-_]?(EXL3.*|NVFP4.*|UD-.*)$', '', model['name']).replace('-', ' ')
+        model['location'] = 'library' if inside else 'added'
+        family, variant = split_name(model['name'] if model['format'] == 'GGUF' or path.name == model['name'] else path.name)
+        model['family'], model['variant'] = family, variant
+        active = active_billions(model['name'])
+        model['active_b'] = active
+        if model.get('receipt') and model['receipt'].get('repo'):
+            model['source'] = model['receipt']['repo']
     models.sort(key=lambda m: (not m['recommended'], not m['name'].startswith('Qwen3.8-Flash-Next-EXL3'), m['name']))
     return {'models': models, 'errors': errors, 'root': str(root)}

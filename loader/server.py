@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import shlex
 import getpass
 import signal
@@ -42,6 +43,9 @@ from .comfyui import release_comfyui, restore_comfyui
 from .chat_api import conversation_router
 from . import engines, app_settings
 from .engine_updates import EngineUpdater, engine_details
+from . import discover as hub
+from .discover import Discovery, engine_support
+from .downloads import DownloadManager
 from inflect_access import access_config, lan_interfaces, private_lan
 
 MODEL_ROOT = Path(os.environ.get('INFLECT_MODEL_ROOT', Path.home() / 'models')).expanduser()
@@ -82,6 +86,18 @@ def save_json(path, data):
     temporary.replace(path)
 
 
+def library_locations():
+    try:
+        data = json.loads((STATE / 'library.json').read_text(encoding='utf-8'))
+        return [str(p) for p in data.get('locations', []) if isinstance(p, str)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def save_library_locations(locations):
+    save_json(STATE / 'library.json', {'locations': locations})
+
+
 def db():
     connection = sqlite3.connect(STATE / 'results.sqlite3')
     connection.execute('CREATE TABLE IF NOT EXISTS benchmarks (id TEXT PRIMARY KEY, created REAL, data TEXT)')
@@ -90,7 +106,7 @@ def db():
 
 class Supervisor:
     def __init__(self):
-        self.inventory = {'models': [], 'errors': [], 'root': str(MODEL_ROOT)}
+        self.inventory = {'models': [], 'errors': [], 'root': str(MODEL_ROOT), 'locations': [], 'revision': 0}
         self.state = 'idle'
         self.error = None
         self.proc = None
@@ -119,7 +135,9 @@ class Supervisor:
         self.memory_preparation = None
 
     async def refresh(self):
-        self.inventory = await asyncio.to_thread(scan, MODEL_ROOT)
+        locations = library_locations()
+        inventory = await asyncio.to_thread(scan, MODEL_ROOT, locations)
+        self.inventory = {**inventory, 'locations': locations, 'revision': self.inventory.get('revision', 0) + 1}
 
     def lookup(self, model_id):
         model = next((m for m in self.inventory['models'] if m['id'] == model_id), None)
@@ -482,11 +500,24 @@ class Supervisor:
 
 supervisor = Supervisor()
 evaluations = EvaluationManager(STATE, supervisor, telemetry)
+discovery = Discovery()
+downloads = None
+
+
+async def download_finished(job):
+    try:
+        await supervisor.refresh()
+    except Exception as exc:
+        supervisor.inventory['errors'] = [str(exc)]
+    folder = (MODEL_ROOT / job['folder']).resolve()
+    model = next((m for m in supervisor.inventory['models'] if Path(m['path']).resolve().is_relative_to(folder)), None)
+    if model:
+        job['model_id'], job['model_path'] = model['id'], model['path']
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global evaluations
+    global evaluations, downloads
     STATE.mkdir(parents=True, exist_ok=True)
     STATE.chmod(0o700)
     lock = (STATE / 'manager.lock').open('a')
@@ -497,6 +528,7 @@ async def lifespan(app):
     with db():
         pass
     evaluations = EvaluationManager(STATE, supervisor, telemetry)
+    downloads = DownloadManager(STATE, MODEL_ROOT, download_finished)
     evaluations.recover()
     await evaluations.cleanup_stale()
     try:
@@ -508,6 +540,8 @@ async def lifespan(app):
         yield
     finally:
         await engine_updater.close()
+        await downloads.close()
+        await discovery.close()
         await evaluations.stop()
         await supervisor.stop()
         for task in tasks:
@@ -553,7 +587,9 @@ async def tool_response_error(request, exc):
 
 @app.get('/api/status')
 async def status():
-    return {'session': supervisor.snapshot(), 'hardware': telemetry.value, 'engines': engine_inventory()}
+    return {'session': supervisor.snapshot(), 'hardware': telemetry.value, 'engines': engine_inventory(),
+            'library_revision': supervisor.inventory.get('revision', 0),
+            'downloads': downloads.summary() if downloads else None}
 
 
 def active_preferences():
@@ -667,6 +703,178 @@ async def library():
 async def refresh():
     await supervisor.refresh()
     return supervisor.inventory
+
+
+class LibraryLocation(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+
+
+def model_entries(folder):
+    """Folders and model files in one directory, for the add-to-library browser."""
+    entries = []
+    for item in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
+        if item.name.startswith('.'):
+            continue
+        try:
+            if item.is_dir():
+                kind = 'model-folder' if (item / 'config.json').is_file() and any(item.glob('*.safetensors')) else (
+                    'gguf-folder' if any(item.glob('*.gguf')) else 'folder')
+                entries.append(dict(name=item.name, path=str(item), kind=kind))
+            elif item.suffix.lower() == '.gguf' and 'mmproj' not in item.name.lower():
+                entries.append(dict(name=item.name, path=str(item), kind='gguf', size=item.stat().st_size))
+        except OSError:
+            continue
+        if len(entries) >= 400:
+            break
+    return entries
+
+
+@app.get('/api/library/browse')
+async def browse_library(path: str = Query('', max_length=4096)):
+    folder = Path(path).expanduser() if path else Path.home()
+    if not folder.is_absolute() or not folder.is_dir():
+        raise ValueError('That folder is unavailable. Check the path or choose another place.')
+    folder = folder.resolve()
+    shortcuts = [dict(name='Home', path=str(Path.home())), dict(name='Model folder', path=str(MODEL_ROOT))]
+    for mounts in (Path('/run/media') / getpass.getuser(), Path('/media') / getpass.getuser(), Path('/mnt')):
+        if mounts.is_dir():
+            shortcuts += [dict(name=m.name, path=str(m)) for m in sorted(mounts.iterdir()) if m.is_dir()][:8]
+    entries = await asyncio.to_thread(model_entries, folder)
+    return dict(path=str(folder), parent=str(folder.parent) if folder.parent != folder else None,
+                entries=entries, shortcuts=shortcuts)
+
+
+@app.post('/api/library/locations')
+async def add_library_location(body: LibraryLocation):
+    location = Path(body.path.strip()).expanduser()
+    if not location.is_absolute() or not location.exists():
+        raise ValueError('That location does not exist on this computer.')
+    location = location.resolve()
+    if location.is_relative_to(MODEL_ROOT.resolve()):
+        raise ValueError('This is already inside your model folder; it is included automatically.')
+    if location.is_file() and location.suffix.lower() != '.gguf':
+        raise ValueError('Choose a .gguf file or a folder that contains models.')
+    found = await asyncio.to_thread(scan, MODEL_ROOT, [str(location)])
+    if not any(not Path(m['path']).resolve().is_relative_to(MODEL_ROOT.resolve()) for m in found['models']):
+        raise ValueError('No compatible models were found there. Inflect looks for GGUF files and EXL3 or safetensors model folders.')
+    locations = library_locations()
+    if str(location) not in locations:
+        save_library_locations(locations + [str(location)])
+    await supervisor.refresh()
+    return supervisor.inventory
+
+
+@app.post('/api/library/locations/remove')
+async def remove_library_location(body: LibraryLocation):
+    save_library_locations([p for p in library_locations() if p != body.path])
+    await supervisor.refresh()
+    return supervisor.inventory
+
+
+@app.get('/api/discover/engines')
+async def discover_engines():
+    support = await asyncio.to_thread(engine_support)
+    try:
+        free = shutil.disk_usage(MODEL_ROOT).free
+    except OSError:
+        free = None
+    return dict(engines=support, disk_free=free, model_root=str(MODEL_ROOT), hub_token=hub.token_source() is not None)
+
+
+@app.get('/api/discover/search')
+async def discover_search(q: str = Query('', max_length=120)):
+    return await discovery.search(await asyncio.to_thread(engine_support), q)
+
+
+@app.get('/api/discover/family')
+async def discover_family(key: str = Query(min_length=1, max_length=200), name: str = Query(min_length=1, max_length=200)):
+    return await discovery.family(await asyncio.to_thread(engine_support), key, name)
+
+
+class DownloadRequest(BaseModel):
+    option_id: str = Field(min_length=1, max_length=64)
+
+
+class HubToken(BaseModel):
+    token: str = Field(max_length=512)
+
+
+async def reset_hub_client():
+    await discovery.close()
+    discovery.cache.clear()
+    discovery.options.clear()
+
+
+@app.get('/api/huggingface')
+async def huggingface_status():
+    token, source = hub.hub_token(), hub.token_source()
+    status = dict(connected=bool(token), source=source, masked=hub.mask_token(token) if token else None,
+                  user=None, role=None, error=None, file=str(hub.TOKEN_FILE))
+    if token:
+        try:
+            status.update(await hub.whoami(token))
+        except ValueError as exc:
+            status['error'] = str(exc)
+        except httpx.HTTPError:
+            status['error'] = 'Hugging Face could not be reached to check the token.'
+    return status
+
+
+@app.post('/api/huggingface')
+async def huggingface_save(body: HubToken):
+    token = body.token.strip()
+    if not re.fullmatch(r'hf_[A-Za-z0-9]{20,}', token):
+        raise ValueError('That does not look like a Hugging Face access token. It starts with hf_ and has no spaces.')
+    if hub.TOKEN_FILE.resolve().is_relative_to(PROJECT.resolve()):
+        raise ValueError('Refusing to store the token inside the Inflect project folder.')
+    try:
+        account = await hub.whoami(token)
+    except httpx.HTTPError:
+        raise ValueError('Hugging Face could not be reached to check the token. Try again when online.') from None
+    hub.save_token(token)
+    await reset_hub_client()
+    return await huggingface_status() | account
+
+
+@app.post('/api/huggingface/remove')
+async def huggingface_remove():
+    hub.remove_token()
+    await reset_hub_client()
+    return await huggingface_status()
+
+
+@app.get('/api/downloads')
+async def download_list():
+    return downloads.snapshot()
+
+
+@app.post('/api/downloads')
+async def download_start(body: DownloadRequest):
+    option = discovery.option(body.option_id)
+    if option['gated'] and not hub.hub_token():
+        raise ValueError('This model asks you to accept its licence on Hugging Face first. Accept it on the model page, '
+                         'then add a Hugging Face access token in Settings → Model library.')
+    downloads.add(option)
+    return downloads.snapshot()
+
+
+@app.post('/api/downloads/{job_id}/{action}')
+async def download_action(job_id: str, action: Literal['pause', 'resume', 'cancel', 'dismiss', 'seen']):
+    if action == 'pause':
+        downloads.pause(job_id)
+    elif action == 'resume':
+        downloads.resume(job_id)
+    elif action == 'cancel':
+        await downloads.cancel(job_id)
+    elif action == 'dismiss':
+        downloads.dismiss(job_id)
+    return downloads.snapshot()
+
+
+@app.post('/api/downloads/seen')
+async def downloads_seen():
+    downloads.mark_seen()
+    return downloads.snapshot()
 
 
 @app.post('/api/load', status_code=202)

@@ -20,3 +20,9 @@ runtime-locks/exl3-freeze.txt
 validation/*.json
 validation/*.png
 validation/DEEPSEEK_CPU_COMPARISON.md
+
+# Access tokens are stored in ~/.config/inflect, never in the project. These
+# patterns are a second guard against a token file being copied in by hand.
+*huggingface-token*
+hf_token*
+.hf_token

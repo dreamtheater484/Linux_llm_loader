@@ -30,7 +30,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra='forbid')
     model_id: str
     engine: Literal['auto', 'exl3', 'vllm', 'gguf'] = 'auto'
-    context: int = Field(262144, ge=2048, le=1048576, multiple_of=256)
+    context: int = Field(262144, ge=2048, le=16777216, multiple_of=256)
     kv: Literal['Q8', 'FP16', 'Q4'] = 'Q8'
     vision: bool = True
     ngram_ram: bool = True

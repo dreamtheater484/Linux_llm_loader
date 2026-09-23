@@ -14,7 +14,7 @@ export function MemoryMetric({ram,model,loaded}:{ram?:Ram;model?:ModelMemory;loa
   const {modelBytes,availableBytes}=memoryBreakdown(ram,model,loaded);
   const percent=ram?.total_bytes&&modelBytes!=null?Math.max(0,Math.min(100,modelBytes/ram.total_bytes*100)):0;
   return <div className="metric memory-metric">
-    <div className="metric-label"><Database size={15}/>MODEL RAM<button className="memory-info" aria-label="Explain RAM usage" title="About these figures" onClick={()=>setOpen(true)}><CircleHelp size={13}/></button></div>
+    <div className="metric-label"><Database size={15}/>Model RAM<button className="memory-info" aria-label="Explain RAM usage" title="About these figures" onClick={()=>setOpen(true)}><CircleHelp size={13}/></button></div>
     <div className="memory-capacity"><strong>{gib(modelBytes)}</strong><span>GiB <span className="memory-total">/ {gib(ram?.total_bytes)} GiB total</span></span></div>
     <div className="meter memory-meter" aria-label={`Model uses ${gib(modelBytes)} of ${gib(ram?.total_bytes)} GiB total RAM`}><i style={{width:`${percent}%`}}/></div>
     <div className="memory-available"><span>Available <strong>{gib(availableBytes)} GiB</strong></span><small>estimated</small></div>
