@@ -127,6 +127,9 @@ code,kbd,pre,.mono{font-family:var(--font-mono)}
 .topbar-right{gap:6px;color:var(--text-3)}
 .topbar-right .icon-btn{color:var(--text-3);padding:8px;border-radius:9px}
 .topbar-right .icon-btn:hover{color:var(--text)}
+.topbar-unload{height:28px;gap:6px;padding:0 10px;font-size:12px;font-weight:560;border-radius:8px;color:var(--text-2)}
+.topbar-unload:hover:not(:disabled){background:var(--danger-soft);border-color:var(--danger-line);color:var(--danger-text)}
+.topbar-unload:disabled{opacity:.5;cursor:not-allowed}
 .status-pill{gap:8px;font-size:12px;font-weight:560;padding:5px 12px 5px 10px;margin-right:6px;border-radius:20px;background:var(--surface-2);border:1px solid var(--line);color:var(--text-3);white-space:nowrap}
 .status-pill i{width:7px;height:7px;background:var(--state)}
 [data-engine=ready] .status-pill{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-text)}
@@ -356,6 +359,8 @@ code,kbd,pre,.mono{font-family:var(--font-mono)}
   .sidebar .nav-item{font-size:12px;padding:8px 4px}
   .theme-choices{grid-template-columns:1fr}
   .topbar{padding:0 14px}
+  .topbar-unload span{display:none}
+  .topbar-unload{padding:0 8px}
   .breadcrumbs>.topbar-model{display:none}
   .inflect-composer-wrap{padding:8px 12px 12px}
 }
