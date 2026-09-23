@@ -20,7 +20,7 @@ const ROWS:Row[] = [
   {key:'vision',label:'Vision tower',value:(s,m)=>m.vision?(s.vision?'On':'Off'):'Not available',short:s=>s.vision?'vision':'no vision'},
   {key:'prediction',label:'Prediction acceleration',value:(s,m)=>!m.mtp?'Not available':s.prediction==='mtp'?`MTP · ${s.draft_tokens} draft`:'Off',short:s=>s.prediction==='mtp'?`MTP ${s.draft_tokens}`:'no MTP'},
   {key:'draft_tokens',label:'',value:()=>'',only:()=>false},
-  {key:'max_output',label:'Maximum output',value:s=>`${shortTokens(s.max_output)} tokens`,short:s=>`${shortTokens(s.max_output)} output`},
+  {key:'max_output',label:'Maximum output',value:s=>s.max_output?`${shortTokens(s.max_output)} tokens`:'Auto',short:s=>s.max_output?`${shortTokens(s.max_output)} output`:'auto output'},
   {key:'reasoning_effort',label:'Thinking',value:(s,m)=>reasoningLabel(s.reasoning_effort,m),short:(s,m)=>`thinking ${reasoningLabel(s.reasoning_effort,m).toLowerCase()}`},
   {key:'cpu_percent',label:'CPU share',value:s=>`${s.cpu_percent}%`,short:s=>`CPU ${s.cpu_percent}%`},
   {key:'gguf_offload',label:'CPU placement',value:s=>s.gguf_offload==='experts'?'Experts':'Whole layers',short:s=>s.gguf_offload==='experts'?'expert offload':'layer offload',only:m=>m.format==='GGUF'&&!!m.experts},

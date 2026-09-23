@@ -140,20 +140,45 @@ def test_ready_state_verifies_mtp_and_context_allocation():
         run(16384, True)
 
 
-def test_overflow_is_rejected_before_generation():
-    supervisor = ready_supervisor('gguf')
-    supervisor.settings = Settings(model_id='test', context=8192, max_output=4096)
-    seen = []
+def run_counted(supervisor, prompt_tokens, seen):
     original = httpx.AsyncClient
     def handle(request):
-        seen.append(request.url.path)
+        seen.append((request.url.path, json.loads(request.content)))
         if request.url.path == '/apply-template':
             return httpx.Response(200, json={'prompt': 'large prompt'})
-        assert request.url.path == '/tokenize'
-        return httpx.Response(200, json={'tokens': [1] * 5000})
+        if request.url.path == '/tokenize':
+            return httpx.Response(200, json={'tokens': [1] * prompt_tokens})
+        events = [{'choices': [{'delta': {'content': 'x'}, 'finish_reason': 'length'}]},
+                  {'usage': {'prompt_tokens': prompt_tokens, 'completion_tokens': 1, 'total_tokens': prompt_tokens + 1}}]
+        return httpx.Response(200, text=''.join('data: ' + json.dumps(e) + '\n\n' for e in events) + 'data: [DONE]\n\n')
     async def run():
         return [e async for e in supervisor.stream([{'role': 'user', 'content': 'Hello'}])]
     with patch.object(server.httpx, 'AsyncClient', side_effect=lambda **kw: original(**kw, transport=httpx.MockTransport(handle))):
-        with pytest.raises(ValueError, match='history is not truncated'):
-            asyncio.run(run())
-    assert seen == ['/apply-template', '/tokenize']
+        return asyncio.run(run())
+
+
+def test_output_cap_is_clamped_to_free_context_not_reserved():
+    supervisor = ready_supervisor('gguf')
+    supervisor.settings = Settings(model_id='test', context=8192, max_output=4096)
+    seen = []
+    events = run_counted(supervisor, 5000, seen)
+    assert seen[-1][1]['max_tokens'] == 8192 - 5000 - 16
+    assert events[-1]['output_cap'] == 4096 and events[-1]['output_budget'] == 8192 - 5000 - 16
+
+
+def test_auto_output_uses_rest_of_context():
+    supervisor = ready_supervisor('gguf')
+    supervisor.settings = Settings(model_id='test', context=32768, max_output=0)
+    seen = []
+    events = run_counted(supervisor, 5050, seen)
+    assert seen[-1][1]['max_tokens'] == 32768 - 5050 - 16
+    assert events[-1]['output_cap'] is None
+
+
+def test_full_context_is_rejected_before_generation():
+    supervisor = ready_supervisor('gguf')
+    supervisor.settings = Settings(model_id='test', context=8192)
+    seen = []
+    with pytest.raises(ValueError, match='history is not truncated'):
+        run_counted(supervisor, 8180, seen)
+    assert [path for path, _ in seen] == ['/apply-template', '/tokenize']

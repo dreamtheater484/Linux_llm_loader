@@ -54,7 +54,7 @@ class Generate(Input):
     prompt: str = Field('', max_length=2_000_000)
     attachment_ids: list[str] = Field(default_factory=list, max_length=20)
     retry: bool = False
-    max_output: int | None = Field(None, ge=16, le=32768)
+    max_output: int | None = Field(None, ge=0, le=32768)
     temperature: float | None = Field(None, ge=0, le=2)
     reasoning_effort: ReasoningEffort | None = None
 

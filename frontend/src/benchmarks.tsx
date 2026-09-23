@@ -24,7 +24,7 @@ const timingLabel=(run:Run)=>`${runPreset(run)} · ${run.summary.total} ${run.su
 const configFields = (s:any,model?:any):[string,string][]=>[
   ['Context',`${number(s.context,0)} tokens`],['KV cache',s.kv],['Vision',s.vision?'On':'Off'],
   ['MTP',s.prediction==='mtp'?`On · ${s.draft_tokens} draft tokens`:`Off · ${s.draft_tokens} configured`],
-  ['Reasoning',reasoningLabel(s.reasoning_effort,model)],['Output limit',`${number(s.max_output,0)} tokens / turn`],
+  ['Reasoning',reasoningLabel(s.reasoning_effort,model)],['Output limit',s.max_output?`${number(s.max_output,0)} tokens / turn`:'Auto · rest of the context'],
   ['Temperature',String(s.temperature)],['CPU placement',`${s.cpu_percent}%`],['CPU threads',String(s.cpu_threads)],['Prompt chunk',`${s.chunk_size} tokens`],
 ];
 

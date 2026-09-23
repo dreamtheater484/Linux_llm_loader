@@ -134,7 +134,8 @@ def test_switch_reasoning_per_request_without_reload_or_budget(engine):
             payload = calls[-1][1]
             assert payload.get('chat_template_kwargs', {}) == reasoning_kwargs(supervisor.model, chosen)
             assert 'reasoning_budget_tokens' not in payload
-            assert payload['max_tokens'] == 4096
+            # Auto output: the reply may use all context left after the counted prompt.
+            assert payload.get('max_tokens') == {'exl3': 262144 - 25 - 128, 'gguf': 262144 - 25 - 16, 'vllm': None}[engine]
             if engine == 'exl3':
                 assert calls[-2][1]['chat_template_kwargs'] == payload.get('chat_template_kwargs', {})
             assert supervisor.settings is initial_settings

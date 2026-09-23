@@ -368,7 +368,7 @@ class Supervisor:
             raise HTTPException(409, 'A request is already running. Wait for completion.')
         effort = reasoning_effort if reasoning_effort is not None else self.settings.reasoning_effort
         template_kwargs = reasoning_kwargs(self.model, effort)
-        output_limit = max_output or self.settings.max_output
+        output_limit = self.settings.max_output if max_output is None else max_output
         if output_limit >= self.settings.context:
             raise ValueError('The answer limit exceeds the context window.')
         tool_payload = (tool_request or ToolRequest()).tool_payload(self.engine, self.tool_format)
@@ -392,7 +392,7 @@ class Supervisor:
         async with self.generation_lock:
             self.cancel.clear()
             payload = dict(model=Path(self.model['path']).name if self.engine == 'exl3' else self.model['id'],
-                messages=messages, max_tokens=output_limit, temperature=self.settings.temperature if temperature is None else temperature,
+                messages=messages, temperature=self.settings.temperature if temperature is None else temperature,
                 stream=True, stream_options={'include_usage': True}, **tool_payload)
             if template_kwargs:
                 payload['chat_template_kwargs'] = template_kwargs
@@ -403,6 +403,15 @@ class Supervisor:
             started, first, last, usage = time.monotonic(), None, None, None
             timings = {}
             wall_started, finish_reason = time.time(), 'stop'
+            def reply_budget(count, reserve):
+                # A cap is an upper bound, never a reservation: the reply may
+                # stop earlier only because the context window is full.
+                room = self.settings.context - count - reserve
+                if room < 16:
+                    raise ValueError(f'Conversation uses {count:,} of {self.settings.context:,} context tokens, leaving no room for a reply. '
+                                     'Start a new conversation or reload with a larger context; history is not truncated.')
+                return min(output_limit, room) if output_limit else room
+            budget = output_limit or None
             async with httpx.AsyncClient(timeout=httpx.Timeout(1800, connect=10), trust_env=False) as client:
                 if self.engine == 'exl3':
                     count_response = await client.post(self.url + '/v1/token/encode', headers=self.headers,
@@ -411,16 +420,18 @@ class Supervisor:
                         raise ValueError('Engine tokenization failed: ' + count_response.text[:2000])
                     count = count_response.json()['length']
                     # Tabby's count excludes the generation prefix; leave an explicit margin.
-                    if count + output_limit + 128 > self.settings.context:
-                        raise ValueError(f'Conversation uses {count:,} tokens before the reply prefix. Reduce it or reserve a smaller answer; history is not truncated.')
+                    budget = reply_budget(count, 128)
                     yield {'type': 'context', 'input_tokens': count, 'prefix_reserve': 128}
                 elif self.engine == 'gguf':
                     count = await llama_count_prompt(client, self.url, self.headers, messages, template_kwargs, tool_payload)
                     if count is not None:
                         reserve = 16
-                        if count + output_limit + reserve > self.settings.context:
-                            raise ValueError(f'Conversation uses {count:,} tokens including the reply prefix. Reduce it or reserve a smaller answer; history is not truncated.')
+                        budget = reply_budget(count, reserve)
                         yield {'type': 'context', 'input_tokens': count, 'prefix_reserve': reserve}
+                # No max_tokens (uncounted image prompts in Auto mode) lets llama.cpp
+                # generate until its context is full, like its own web UI.
+                if budget:
+                    payload['max_tokens'] = budget
                 async with client.stream('POST', self.url + '/v1/chat/completions', headers=self.headers, json=payload) as response:
                     if response.status_code != 200:
                         detail = (await response.aread()).decode(errors='replace')
@@ -494,7 +505,8 @@ class Supervisor:
                           prompt_tokens_per_second=number(usage.get('prompt_tokens_per_sec')),
                           prompt_seconds=number(usage.get('prompt_time')),
                           first_token_seconds=first - started if first else None, total_seconds=total_time,
-                          configured_context=self.settings.context, finish_reason=finish_reason, reasoning_effort=effort)
+                          configured_context=self.settings.context, finish_reason=finish_reason, reasoning_effort=effort,
+                          output_cap=output_limit or None, output_budget=budget)
             samples = [s for s in telemetry.history if s['timestamp'] >= wall_started]
             def peak(section, key):
                 values = [(s.get(section) or {}).get(key) if section else s.get(key) for s in samples]
@@ -957,7 +969,7 @@ async def logs():
 
 class ChatRequest(ToolRequest):
     messages: list[dict] = Field(min_length=1, max_length=1000)
-    max_output: int | None = Field(None, ge=16, le=32768)
+    max_output: int | None = Field(None, ge=0, le=32768)
     temperature: float | None = Field(None, ge=0, le=2)
     reasoning_effort: ReasoningEffort | None = None
 

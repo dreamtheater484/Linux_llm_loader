@@ -36,7 +36,8 @@ class Settings(BaseModel):
     ngram_ram: bool = True
     prediction: Literal['off', 'mtp'] = 'off'
     draft_tokens: int = Field(2, ge=1, le=16)
-    max_output: int = Field(4096, ge=16, le=32768)
+    # 0 = Auto: the reply may use whatever context the prompt leaves free.
+    max_output: int = Field(0, ge=0, le=32768)
     cpu_percent: int = Field(80, ge=0, le=100)
     gguf_offload: Literal['layers', 'experts'] = 'layers'
     cpu_threads: int = Field(8, ge=1, le=64)
@@ -55,6 +56,8 @@ class Settings(BaseModel):
 
     @model_validator(mode='after')
     def answer_fits(self):
+        if 0 < self.max_output < 16:
+            raise ValueError('Maximum answer must be Auto (0) or at least 16 tokens.')
         if self.max_output >= self.context:
             raise ValueError('Maximum answer must be smaller than the context window.')
         return self
