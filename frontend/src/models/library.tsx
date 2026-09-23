@@ -1,11 +1,12 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
-import {AlertTriangle, ArrowUpDown, Braces, Check, Compass, Copy, Cpu, Eye, FolderPlus, GripVertical, HardDrive, Layers, MessageSquare, Pencil, Play, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, Zap} from 'lucide-react';
+import {AlertTriangle, ArrowUpDown, Braces, Check, LoaderCircle, Compass, Copy, Cpu, Eye, FolderPlus, GripVertical, HardDrive, Layers, MessageSquare, Pencil, Play, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, Zap} from 'lucide-react';
 import type {Model, Profile, Settings} from '../types';
 import {Hint, formatNumber, hueStyle} from '../ui';
 import {correctedRam} from '../memory';
 import {reasoningLabel} from '../reasoning';
 import {shortTokens} from './context-slider';
+import {sameSettings, type LiveSetup} from '../profiles';
 import {GPU_WORKING, assessFit, expertFraction, fitRank, gb, modelFit} from './fit';
 import type {Fit, Hardware} from './fit';
 
@@ -59,7 +60,7 @@ export function FitCard({fit,hw,note}:{fit:Fit;hw:Hardware;note?:string}) {
 }
 
 type Props = {
-  models:Model[]; profiles:Profile[]; hardware:Hardware; session:any; ready:boolean; busy:boolean;
+  models:Model[]; profiles:Profile[]; hardware:Hardware; session:any; ready:boolean; busy:boolean; live:LiveSetup|null;
   focusId:string|null; onFocus:(id:string)=>void; defaults:(m:Model)=>Settings; locations:string[];
   onChat:(m:Model,profile?:Profile)=>void; onConfigure:(m:Model,profile?:Profile)=>void;
   onRename:(p:Profile)=>void; onDuplicate:(p:Profile)=>void; onDelete:(p:Profile)=>void; onCopy:(p:Profile)=>void; copiedId:string|null;
@@ -161,6 +162,7 @@ function ModelDetail(props:Props&{model:Model;fit:Fit;versions:Model[];fits:Map<
   const setups=props.profiles.filter(p=>p.settings.model_id===model.id);
   const columns:{id:string;title:string;subtitle?:string;settings:Settings;profile?:Profile}[]=[{id:'default',title:'Inflect defaults',subtitle:'Not saved · starting point',settings:base},...setups.map((p,i)=>({id:p.id,title:setupName(p,model,base),subtitle:p.auto_name?`Setup ${i+1}`:differences(p.settings,model,base).slice(0,3).join(' · ')||'Same as defaults',settings:p.settings,profile:p}))];
   const rows=rowsFor(model);
+  const liveState=(c:{settings:Settings;profile?:Profile})=>!props.live?null:(c.profile?props.live.profileId===c.profile.id:!props.live.profileId&&sameSettings(c.settings,props.live.settings))?props.live.state:null;
   const varies=(r:Row)=>columns.some(c=>!same(c.settings,columns[0].settings,r.key as keyof Settings)||(r.key==='engine'&&c.settings.engine!==columns[0].settings.engine));
   const shown=props.onlyDiff&&setups.length?rows.filter(varies):rows;
   const best=(pick:(p:Profile)=>number|null|undefined,low=false)=>{const values=setups.map(pick).filter((v):v is number=>v!=null&&Number.isFinite(v));return values.length>1?(low?Math.min(...values):Math.max(...values)):null};
@@ -195,12 +197,12 @@ function ModelDetail(props:Props&{model:Model;fit:Fit;versions:Model[];fits:Map<
       <header><div><h3>Saved setups <span>{setups.length}</span><Hint label="saved setups" text="A setup (profile) remembers this model together with its settings. Each column is one setup; values that differ from Inflect’s defaults are highlighted."/></h3><p>{setups.length?'Compare side by side. Highlighted values differ from the defaults.':'No saved setups yet. Adjust the settings, then choose Save as profile to keep them.'}</p></div>
         <div className="setup-compare-actions">{setups.length>0&&<label className="only-diff"><input type="checkbox" checked={props.onlyDiff} onChange={e=>props.setOnlyDiff(e.target.checked)}/>Only differences</label>}<button className="secondary" disabled={busy} onClick={()=>props.onConfigure(model)}><Plus size={14}/>New setup</button></div></header>
       <div className="compare-scroll"><table className="compare-table">
-        <thead><tr><th scope="col"><span className="sr-only">Setting</span></th>{columns.map(c=><th scope="col" key={c.id} className={c.profile?'':'default-col'}>
+        <thead><tr><th scope="col"><span className="sr-only">Setting</span></th>{columns.map(c=>{const state=liveState(c);return <th scope="col" key={c.id} className={`${c.profile?'':'default-col'} ${state?`live-col ${state}`:''}`}>
           <div className="compare-head"><strong title={c.profile?.name||c.title}>{c.title}</strong>{c.subtitle&&<small>{c.subtitle}</small>}
-            <div className="compare-actions">{c.profile?<><button className="primary small" disabled={busy||!!model.issues.length} onClick={()=>props.onChat(model,c.profile)} aria-label={`Load ${c.profile.name}`}><Play size={12}/>Load</button><button className="icon-btn" disabled={busy} title="Edit settings" aria-label={`Edit ${c.profile.name}`} onClick={()=>props.onConfigure(model,c.profile)}><Settings2 size={14}/></button><button className="icon-btn" disabled={busy} title="Rename" aria-label={`Rename ${c.profile.name}`} onClick={()=>props.onRename(c.profile!)}><Pencil size={14}/></button><button className="icon-btn" disabled={busy} title="Duplicate" aria-label={`Duplicate ${c.profile.name}`} onClick={()=>props.onDuplicate(c.profile!)}><Copy size={14}/></button><button className="icon-btn" title={props.copiedId===c.profile.id?'Copied':'Copy configuration'} aria-label={`Copy configuration of ${c.profile.name}`} onClick={()=>props.onCopy(c.profile!)}>{props.copiedId===c.profile.id?<Check size={14}/>:<Braces size={14}/>}</button><button className="icon-btn danger" disabled={busy} title="Move to Recently deleted" aria-label={`Delete ${c.profile.name}`} onClick={()=>props.onDelete(c.profile!)}><Trash2 size={14}/></button></>:
-              <button className="secondary small" disabled={busy||!!model.issues.length} onClick={()=>props.onChat(model)}><Play size={12}/>Load defaults</button>}</div></div></th>)}</tr></thead>
+            <div className="compare-actions">{state?<span className={`setup-live ${state}`}>{state==='loading'?<LoaderCircle size={12} className="spin"/>:<Check size={12}/>}{state==='loading'?'Loading':'Loaded'}</span>:null}{c.profile?<>{!state&&<button className="primary small" disabled={busy||!!model.issues.length} onClick={()=>props.onChat(model,c.profile)} aria-label={`Load ${c.profile.name}`}><Play size={12}/>Load</button>}<button className="icon-btn" disabled={busy} title="Edit settings" aria-label={`Edit ${c.profile.name}`} onClick={()=>props.onConfigure(model,c.profile)}><Settings2 size={14}/></button><button className="icon-btn" disabled={busy} title="Rename" aria-label={`Rename ${c.profile.name}`} onClick={()=>props.onRename(c.profile!)}><Pencil size={14}/></button><button className="icon-btn" disabled={busy} title="Duplicate" aria-label={`Duplicate ${c.profile.name}`} onClick={()=>props.onDuplicate(c.profile!)}><Copy size={14}/></button><button className="icon-btn" title={props.copiedId===c.profile.id?'Copied':'Copy configuration'} aria-label={`Copy configuration of ${c.profile.name}`} onClick={()=>props.onCopy(c.profile!)}>{props.copiedId===c.profile.id?<Check size={14}/>:<Braces size={14}/>}</button><button className="icon-btn danger" disabled={busy} title="Move to Recently deleted" aria-label={`Delete ${c.profile.name}`} onClick={()=>props.onDelete(c.profile!)}><Trash2 size={14}/></button></>:
+              !state&&<button className="secondary small" disabled={busy||!!model.issues.length} onClick={()=>props.onChat(model)}><Play size={12}/>Load defaults</button>}</div></div></th>})}</tr></thead>
         <tbody>
-          {shown.map(r=><tr key={r.key}><th scope="row">{r.label}</th>{columns.map((c,i)=>{const changed=i>0&&(!same(c.settings,base,r.key as keyof Settings)||(r.key==='engine'&&c.settings.engine!==base.engine));return <td key={c.id} className={changed?'changed':''}>{r.value(c.settings,model)}</td>})}</tr>)}
+          {shown.map(r=><tr key={r.key}><th scope="row">{r.label}</th>{columns.map((c,i)=>{const live=liveState(c),changed=i>0&&(!same(c.settings,base,r.key as keyof Settings)||(r.key==='engine'&&c.settings.engine!==base.engine));return <td key={c.id} className={`${changed?'changed':''} ${live?`live-col ${live}`:''}`}>{r.value(c.settings,model)}</td>})}</tr>)}
           {setups.length>0&&<>
             <tr className="measure-heading"><th scope="rowgroup" colSpan={columns.length+1}>Measured on this computer</th></tr>
             <tr><th scope="row">Writing speed</th><td className="muted">—</td>{setups.map(p=><td key={p.id} className={p.performance?.decode_tps!=null&&p.performance.decode_tps===bestDecode?'best':''}>{p.performance?.decode_tps!=null?<>{formatNumber(p.performance.decode_tps)} <small>tok/s</small></>:<span className="muted" title="Run a speed benchmark with this setup to measure it">Not measured</span>}</td>)}</tr>

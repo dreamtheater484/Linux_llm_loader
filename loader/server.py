@@ -1098,6 +1098,17 @@ def ensure_profile_name(saved, name, except_id=None):
         raise HTTPException(409, 'A profile with this name already exists. Choose another name or edit that profile.')
 
 
+def next_copy(saved, name, model_id):
+    active = [p for p in saved if not p.get('deleted_at')]
+    names = {p['name'].casefold() for p in active}
+    base = re.sub(r' · copy \d+$', '', name)[:155]
+    used_numbers = {p.get('copy_number') for p in active if p['settings']['model_id'] == model_id}
+    index = 1
+    while f'{base} · copy {index}'.casefold() in names or index in used_numbers:
+        index += 1
+    return f'{base} · copy {index}', index
+
+
 def find_profile(saved, profile_id):
     profile = next((p for p in saved if p['id'] == profile_id), None)
     if profile is None:
@@ -1171,14 +1182,8 @@ async def duplicate_profile(profile_id: str):
     original = find_profile(saved, profile_id)
     if original.get('deleted_at'):
         raise HTTPException(409, 'Restore this profile before duplicating it.')
-    names = {p['name'].casefold() for p in saved if not p.get('deleted_at')}
-    base = re.sub(r' · copy \d+$', '', original['name'])[:155]
-    used_numbers = {p.get('copy_number') for p in saved if not p.get('deleted_at')
-                    and p['settings']['model_id'] == original['settings']['model_id']}
-    index = 1
-    while f'{base} · copy {index}'.casefold() in names or index in used_numbers:
-        index += 1
-    duplicate = {**original, 'id': secrets.token_hex(8), 'name': f'{base} · copy {index}',
+    name, index = next_copy(saved, original['name'], original['settings']['model_id'])
+    duplicate = {**original, 'id': secrets.token_hex(8), 'name': name,
                  'copy_number': index, 'updated_at': time.time()}
     saved.insert(saved.index(original) + 1, duplicate)
     save_json(STATE / 'profiles.json', saved)
@@ -1189,8 +1194,14 @@ async def duplicate_profile(profile_id: str):
 async def save_profile(body: ProfileRequest):
     validate(body.settings, supervisor.lookup(body.settings.model_id), check_install=False)
     saved = read_profiles()
-    ensure_profile_name(saved, body.name)
-    saved.append(dict(**body.model_dump(), id=secrets.token_hex(8), updated_at=time.time()))
+    profile = dict(**body.model_dump(), id=secrets.token_hex(8), updated_at=time.time())
+    taken = any(p['name'].strip().casefold() == body.name.casefold() for p in saved if not p.get('deleted_at'))
+    if body.auto_name and taken:
+        # Generated names leave out temperature and thinking, so distinct setups can share one.
+        profile['name'], profile['copy_number'] = next_copy(saved, body.name, body.settings.model_id)
+    else:
+        ensure_profile_name(saved, body.name)
+    saved.append(profile)
     save_json(STATE / 'profiles.json', saved)
     return await profiles()
 

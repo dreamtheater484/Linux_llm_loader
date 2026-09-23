@@ -7,6 +7,15 @@ import {formatNumber} from './ui';
 import './profiles.css';
 import {reasoningLabel} from './reasoning';
 
+export function sameSettings(a:Settings|null|undefined, b:Settings|null|undefined) {
+  if(!a||!b)return false;
+  const keys=new Set([...Object.keys(a),...Object.keys(b)]) as Set<keyof Settings>;
+  return [...keys].every(k=>a[k]===b[k]);
+}
+
+/** The loaded or loading settings, and which saved setup (if any) they are. */
+export type LiveSetup={settings:Settings;state:'loading'|'loaded';profileId:string|null};
+
 export function suggestedProfileName(model:Model, settings:Settings) {
   const name=model.name.replace(/-Uncensored-HauhauCS-Aggressive/i,' Agg.').replace(/[-_]?(EXL3|NVFP4|UD-|Q\d|IQ\d|MXFP\d).*$/,'').replace(/[-_]/g,' ');
   return `${name} · ${model.quant.replace(' bpw','bpw')} · ${settings.context/1024}K/${settings.kv} · V:${settings.vision?'on':'off'} · MTP:${settings.prediction==='mtp'?`on/${settings.draft_tokens}`:'off'} · CPU:${settings.cpu_percent}%`;
@@ -27,7 +36,7 @@ const modelLabel=(model:Model|undefined)=>model?.name.replace(/[-_]?(EXL3|NVFP4|
 const sourceLabel=(source:ProfileSpeedSource|null|undefined)=>source?`${source.kind==='speed'?'Speed test':source.benchmark||'Coding benchmark'} · ${new Date(source.created*1000).toLocaleDateString()} · median`:'No matching measurement';
 const gib=(bytes:number|null|undefined)=>bytes==null?'—':formatNumber(bytes/2**30,1);
 
-type Props={profiles:Profile[];models:Model[];trash:boolean;busy:boolean;editingId:string|null;copiedId:string|null;
+type Props={profiles:Profile[];models:Model[];trash:boolean;busy:boolean;editingId:string|null;live?:LiveSetup|null;copiedId:string|null;
   onLoad:(p:Profile)=>void;onEdit:(p:Profile)=>void;onRename:(p:Profile)=>void;onDuplicate:(p:Profile)=>void;onDelete:(p:Profile)=>void;
   onRestore:(p:Profile)=>void;onCopy:(p:Profile)=>void;onReorder:(ids:string[])=>void;onBenchmarks:()=>void};
 
@@ -86,7 +95,8 @@ export function ProfileList(props:Props) {
       const index=profiles.findIndex(p=>p.id===profile.id);
       const model=models.find(m=>m.id===profile.settings.model_id),open=expanded.has(profile.id),s=profile.settings;
       const results=profile.benchmark_results||[],related=profile.related_results||[];
-      return <article key={profile.id} data-profile-id={profile.id} title={model?.name||profile.name} className={`compact-profile ${open?'expanded':''} ${props.editingId===profile.id?'selected':''} ${over===profile.id&&over!==dragged?'drop-target':''} ${dragged===profile.id?'dragging':''}`}>
+      const state=!trash&&props.live?.profileId===profile.id?props.live.state:null;
+      return <article key={profile.id} data-profile-id={profile.id} title={model?.name||profile.name} className={`compact-profile ${open?'expanded':''} ${props.editingId===profile.id?'selected':''} ${state?`live ${state}`:''} ${over===profile.id&&over!==dragged?'drop-target':''} ${dragged===profile.id?'dragging':''}`}>
         <div className="compact-profile-row">
           {!trash&&<button className="profile-drag icon-btn" title="Drag to reorder. Arrow keys also move this profile." aria-label={`Reorder ${profile.name}`} disabled={busy||!canReorder}
             onPointerDown={e=>{if(e.button!==0)return;e.currentTarget.setPointerCapture(e.pointerId);pointer.current={id:profile.id,x:e.clientX,y:e.clientY,moving:false,target:null}}}
@@ -94,6 +104,7 @@ export function ProfileList(props:Props) {
             onKeyDown={e=>{if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();const target=profiles[index+(e.key==='ArrowUp'?-1:1)];if(target)move(profile.id,target.id)}}}><GripVertical size={18}/></button>}
           <button className="profile-expand" aria-expanded={open} aria-controls={`profile-${profile.id}`} onClick={()=>toggle(profile.id)}>
             <span className="profile-title">{modelLabel(model)}</span><span className="profile-quant">{model?.quant||'Unknown quant'} <small>{model?.format}</small></span>{(!profile.auto_name||profile.copy_number)&&<span className="profile-custom-name">{profile.auto_name?`Copy ${profile.copy_number}`:profile.name}</span>}
+            {state&&<span className={`setup-live ${state}`}>{state==='loading'?'Loading':'Loaded'}</span>}
             {props.editingId===profile.id&&<span className="profile-subtitle">Editing this setup</span>}
           </button>
           <button className="icon-btn profile-chevron" aria-label={`${open?'Collapse':'Expand'} ${profile.name}`} aria-expanded={open} onClick={()=>toggle(profile.id)}><ChevronDown size={17}/></button>

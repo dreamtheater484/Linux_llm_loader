@@ -133,6 +133,20 @@ def test_lan_access_is_limited_to_configured_private_subnet():
         assert not server.origin_allowed('http://10.42.7.99:7860')
 
 
+def test_auto_named_profile_collision_gets_copy_number(tmp_path):
+    base = {'name': 'Model · 3bpw · CPU:60%', 'auto_name': True, 'settings': Settings(model_id='test').model_dump()}
+    headers = {'X-Inflect-Local': '1'}
+    with patch.object(server, 'STATE', tmp_path), patch.object(server.supervisor, 'lookup', return_value=model()), patch.object(server.supervisor, 'refresh'):
+        with TestClient(server.app) as client:
+            assert client.post('/api/profiles', json=base, headers=headers).status_code == 200
+            warmer = {**base, 'settings': {**base['settings'], 'temperature': 1.0}}
+            response = client.post('/api/profiles', json=warmer, headers=headers)
+            assert response.status_code == 200
+            copy = next(p for p in response.json() if p['settings']['temperature'] == 1.0)
+            assert copy['name'] == 'Model · 3bpw · CPU:60% · copy 1' and copy['copy_number'] == 1
+            assert client.post('/api/profiles', json={**base, 'auto_name': False}, headers=headers).status_code == 409
+
+
 def test_profile_migration_edit_collision_delete_restore(tmp_path):
     old = {'name': 'Everyday', 'settings': Settings(model_id='test').model_dump()}
     path = tmp_path / 'profiles.json'
