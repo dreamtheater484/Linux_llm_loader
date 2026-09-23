@@ -1,6 +1,6 @@
-import {useEffect, useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
-import {AlertTriangle, Braces, Check, Compass, Copy, Cpu, Eye, FolderPlus, HardDrive, Layers, MessageSquare, Pencil, Play, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, Zap} from 'lucide-react';
+import {AlertTriangle, ArrowUpDown, Braces, Check, Compass, Copy, Cpu, Eye, FolderPlus, GripVertical, HardDrive, Layers, MessageSquare, Pencil, Play, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, Zap} from 'lucide-react';
 import type {Model, Profile, Settings} from '../types';
 import {Hint, formatNumber, hueStyle} from '../ui';
 import {correctedRam} from '../memory';
@@ -63,62 +63,99 @@ type Props = {
   focusId:string|null; onFocus:(id:string)=>void; defaults:(m:Model)=>Settings; locations:string[];
   onChat:(m:Model,profile?:Profile)=>void; onConfigure:(m:Model,profile?:Profile)=>void;
   onRename:(p:Profile)=>void; onDuplicate:(p:Profile)=>void; onDelete:(p:Profile)=>void; onCopy:(p:Profile)=>void; copiedId:string|null;
-  onAdd:()=>void; onDiscover:()=>void; onRefresh:()=>void;
+  onAdd:()=>void; onDiscover:()=>void; onRefresh:()=>void; request:(path:string,body?:unknown,method?:string)=>Promise<any>;
   tab:'library'|'profiles'|'deleted'; onTab:(tab:'library'|'profiles'|'deleted')=>void; deletedCount:number; allProfiles:ReactNode;
 };
 type Filter = 'all'|'fits'|'GGUF'|'EXL3'|'profiles';
+type Sort = 'custom'|'name'|'size'|'fit'|'recent';
+const SORTS:[Sort,string][] = [['custom','Your order'],['recent','Recently used'],['name','Name'],['size','Largest first'],['fit','Runs best here']];
+/** Stable key for a model family, e.g. "Qwen 3.5 0.8B" and "Qwen3.5 0.8B" share one. */
+export const familyKey = (m:Model) => familyOf(m).toLowerCase().replace(/(^|\s)([a-z]+) (\d+(?:\.\d+)*)(?=\s|$)/g,'$1$2$3');
+type Family = {key:string;name:string;models:Model[];formats:string[];small:number;large:number;best:number;setups:number;used:number};
 
 export function ModelsPage(props:Props) {
   const {models,profiles,hardware:hw,session,ready}=props;
   const [query,setQuery]=useState(''),[filter,setFilter]=useState<Filter>('all'),[onlyDiff,setOnlyDiff]=useState(false);
+  const [sort,setSort]=useState<Sort>('custom'),[order,setOrder]=useState<string[]>([]),[drag,setDrag]=useState<{key:string;over?:string;after?:boolean}|null>(null),[announce,setAnnounce]=useState('');
+  const picks=useRef(new Map<string,string>());
+  useEffect(()=>{props.request('/api/library/order').then(d=>{setOrder(d.order);setSort(d.sort)}).catch(()=>{})},[]);
+  const persist=(nextOrder:string[],nextSort:Sort)=>{setOrder(nextOrder);setSort(nextSort);props.request('/api/library/order',{order:nextOrder,sort:nextSort},'PUT').catch(()=>{})};
   const fits=useMemo(()=>new Map(models.map(m=>[m.id,modelFit(m,hw)])),[models,hw.vram,hw.ram]);
   const profileCount=(id:string)=>profiles.filter(p=>p.settings.model_id===id).length;
+  const loadedId=ready?session?.model?.id:null;
   const norm=(t:string)=>t.toLowerCase().replace(/[-_]+/g,' ');
   const matches=(m:Model)=>norm(`${m.name} ${m.title} ${m.family} ${m.variant} ${m.quant} ${m.format}`).includes(norm(query).trim())&&(
     filter==='all'||(filter==='fits'?fitRank[fits.get(m.id)!.level]<=1:filter==='profiles'?profileCount(m.id)>0:m.format===filter));
-  const groups=useMemo(()=>{
+  const families=useMemo(()=>{
     const map=new Map<string,Model[]>();
-    for(const m of models.filter(matches)){const key=familyOf(m).toLowerCase().replace(/(^|\s)([a-z]+) (\d+(?:\.\d+)*)(?=\s|$)/g,'$1$2$3');map.set(key,[...(map.get(key)||[]),m])}
-    return [...map.values()].map(list=>list.sort((a,b)=>b.bytes-a.bytes)).sort((a,b)=>{
-      const pa=a.some(m=>profileCount(m.id)),pb=b.some(m=>profileCount(m.id));
-      return pa!==pb?(pa?-1:1):familyOf(a[0]).localeCompare(familyOf(b[0]));
-    });
-  },[models,profiles,query,filter,fits]);
-  const model=models.find(m=>m.id===props.focusId)||groups[0]?.[0]||models[0];
-  useEffect(()=>{if(model&&model.id!==props.focusId)props.onFocus(model.id)},[model?.id]);
+    for(const m of models)map.set(familyKey(m),[...(map.get(familyKey(m))||[]),m]);
+    return [...map].map(([key,list]):Family=>{list.sort((a,b)=>b.bytes-a.bytes);const used=profiles.filter(p=>list.some(m=>m.id===p.settings.model_id)).map(p=>Math.max(p.loaded_memory?.measured_at||0,p.updated_at||0));
+      return {key,name:familyOf(list[0]),models:list,formats:[...new Set(list.map(m=>m.format))],small:list[list.length-1].bytes,large:list[0].bytes,
+        best:Math.min(...list.map(m=>fitRank[fits.get(m.id)!.level])),setups:list.reduce((n,m)=>n+profileCount(m.id),0),used:list.some(m=>m.id===loadedId)?Infinity:Math.max(0,...used)}});
+  },[models,profiles,fits,loadedId]);
+  const byName=(a:Family,b:Family)=>a.name.localeCompare(b.name,undefined,{numeric:true,sensitivity:'base'});
+  const sorted=useMemo(()=>{const list=[...families];const rank=new Map(order.map((k,i)=>[k,i]));
+    const compare:Record<Sort,(a:Family,b:Family)=>number>={
+      custom:(a,b)=>!order.length?((b.setups>0?1:0)-(a.setups>0?1:0)||byName(a,b)):((rank.get(a.key)??-1)-(rank.get(b.key)??-1)||byName(a,b)),
+      name:byName,size:(a,b)=>b.large-a.large||byName(a,b),fit:(a,b)=>a.best-b.best||b.large-a.large,recent:(a,b)=>b.used-a.used||byName(a,b)};
+    return list.sort(compare[sort]);
+  },[families,order,sort]);
+  const visible=sorted.filter(f=>f.models.some(matches));
+  const model=models.find(m=>m.id===props.focusId)||visible[0]?.models[0]||models[0];
+  const current=model?familyKey(model):null;
+  useEffect(()=>{if(model){picks.current.set(familyKey(model),model.id);if(model.id!==props.focusId)props.onFocus(model.id)}},[model?.id]);
+  const open=(f:Family)=>{const remembered=f.models.find(m=>m.id===picks.current.get(f.key));
+    props.onFocus((remembered||f.models.find(m=>m.id===loadedId)||[...f.models].sort((a,b)=>profileCount(b.id)-profileCount(a.id)||fitRank[fits.get(a.id)!.level]-fitRank[fits.get(b.id)!.level])[0]).id)};
+  /** Moving a model always switches to "Your order", starting from what is on screen. */
+  const move=(key:string,target:string,after:boolean)=>{if(key===target)return;
+    const base=sorted.map(f=>f.key).filter(k=>k!==key);const index=base.indexOf(target)+(after?1:0);base.splice(index,0,key);persist(base,'custom');
+    setAnnounce(`${families.find(f=>f.key===key)?.name} moved to position ${index+1}`)};
+  const nudge=(f:Family,step:number)=>{const i=visible.indexOf(f),target=visible[i+step];if(target)move(f.key,target.key,step>0);requestAnimationFrame(()=>document.querySelector<HTMLElement>(`[data-family="${CSS.escape(f.key)}"] .family-open`)?.focus())};
   const counts:Record<Filter,number>={all:models.length,fits:models.filter(m=>fitRank[fits.get(m.id)!.level]<=1).length,GGUF:models.filter(m=>m.format==='GGUF').length,EXL3:models.filter(m=>m.format==='EXL3').length,profiles:models.filter(m=>profileCount(m.id)).length};
-  const loadedId=ready?session?.model?.id:null;
+  const size=(f:Family)=>f.models.length===1?gb(f.large):`${gb(f.small).replace(' GiB','')}–${gb(f.large)}`;
 
   return <main className="page models-page">
     <div className="page-heading"><div><h1>Models</h1><p>Everything on this computer. Pick a model to compare its saved setups, tune it and start a chat.</p></div>
       <div className="page-actions"><button className="secondary" onClick={props.onAdd}><FolderPlus size={15}/>Add from this computer</button><button className="primary" onClick={props.onDiscover}><Compass size={15}/>Discover models</button></div></div>
     <div className="profile-toolbar models-tabs" role="tablist">
-      <button role="tab" aria-selected={props.tab==='library'} className={props.tab==='library'?'chosen':''} onClick={()=>props.onTab('library')}>Library <span>{models.length}</span></button>
+      <button role="tab" aria-selected={props.tab==='library'} className={props.tab==='library'?'chosen':''} onClick={()=>props.onTab('library')}>Library <span>{families.length}</span></button>
       <button role="tab" aria-selected={props.tab==='profiles'} className={props.tab==='profiles'?'chosen':''} onClick={()=>props.onTab('profiles')}>All saved setups <span>{profiles.length}</span></button>
       <button role="tab" aria-selected={props.tab==='deleted'} className={props.tab==='deleted'?'chosen':''} onClick={()=>props.onTab('deleted')}><Trash2 size={13}/>Recently deleted <span>{props.deletedCount}</span></button>
     </div>
     {props.tab!=='library'?props.allProfiles:<div className="models-layout">
       <aside className="models-list" aria-label="Your models">
         <label className="models-search"><Search size={15}/><input aria-label="Search models" placeholder="Find a model, quant or format…" value={query} onChange={e=>setQuery(e.target.value)}/><kbd>/</kbd></label>
-        <div className="models-filters" role="group" aria-label="Filter models">{([['all','All'],['fits','Runs well here'],['profiles','With setups'],['GGUF','GGUF'],['EXL3','EXL3']] as [Filter,string][]).filter(([id])=>id==='all'||counts[id]>0).map(([id,label])=><button key={id} aria-pressed={filter===id} className={filter===id?'chosen':''} onClick={()=>setFilter(id)}>{label}<span>{counts[id]}</span></button>)}</div>
-        <div className="models-groups">
-          {groups.map(list=>{const first=list[0];return <section key={familyOf(first)} className="model-group" style={hueStyle(familyOf(first))}>
-            <header><span className="model-symbol">{familyOf(first).charAt(0).toUpperCase()}</span><strong title={familyOf(first)}>{familyOf(first)}</strong><small>{list.length===1?'1 version':`${list.length} versions`}</small></header>
-            {list.map(m=>{const fit=fits.get(m.id)!,count=profileCount(m.id);return <button key={m.id} className={`variant-row ${model?.id===m.id?'selected':''}`} aria-current={model?.id===m.id?'true':undefined} onClick={()=>props.onFocus(m.id)}>
-              <span className="variant-main"><b>{m.quant}</b><span className={`format-tag ${m.format.toLowerCase()}`}>{m.format}</span>{m.variant&&<span className="variant-name" title={m.variant}>{m.variant}</span>}</span>
-              <span className="variant-meta"><FitDot fit={fit}/>{gb(m.bytes)}{m.vision&&<Eye size={12} aria-label="Vision"/>}{count>0&&<span className="setup-count" title={`${count} saved setup${count===1?'':'s'}`}>{count} setup{count===1?'':'s'}</span>}{m.issues.length>0&&<AlertTriangle size={12} className="issue-icon" aria-label="Incomplete"/>}{loadedId===m.id&&<span className="loaded-pill">Loaded</span>}</span>
-            </button>})}
-          </section>})}
-          {!groups.length&&<div className="models-empty"><p>{models.length?'No models match. Try another search or filter.':'No models found yet. Add a folder from this computer or discover a model to download.'}</p>{!models.length&&<button className="primary" onClick={props.onDiscover}><Compass size={15}/>Discover models</button>}</div>}
+        <div className="models-list-tools">
+          <label><span className="sr-only">Show</span><select aria-label="Show" value={filter} onChange={e=>setFilter(e.target.value as Filter)}>{([['all','All models'],['fits','Runs well here'],['profiles','With saved setups'],['GGUF','GGUF only'],['EXL3','EXL3 only']] as [Filter,string][]).filter(([id])=>id==='all'||counts[id]>0).map(([id,label])=><option key={id} value={id}>{label} ({counts[id]})</option>)}</select></label>
+          <label><ArrowUpDown size={13}/><span className="sr-only">Sort</span><select aria-label="Sort models" value={sort} onChange={e=>persist(e.target.value==='custom'&&!order.length?sorted.map(f=>f.key):order,e.target.value as Sort)}>{SORTS.map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label>
         </div>
-        <footer className="models-list-footer"><button className="icon-link" onClick={props.onRefresh}><RefreshCw size={13}/>Rescan folders</button>{props.locations.length>0&&<span title={props.locations.join('\n')}>+ {props.locations.length} added location{props.locations.length===1?'':'s'}</span>}</footer>
+        <ul className="family-list" onDragEnd={()=>setDrag(null)}>
+          {visible.map(f=>{const selected=f.key===current,loaded=f.models.some(m=>m.id===loadedId),issue=f.models.every(m=>m.issues.length>0);
+            const over=drag?.over===f.key&&drag.key!==f.key?(drag.after?'drop-after':'drop-before'):'';
+            return <li key={f.key} data-family={f.key} className={`family-row ${selected?'selected':''} ${drag?.key===f.key?'dragging':''} ${over}`} draggable={!query}
+              onDragStart={e=>{e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',f.name);setDrag({key:f.key})}}
+              onDragOver={e=>{if(!drag)return;e.preventDefault();const r=e.currentTarget.getBoundingClientRect();const after=e.clientY>r.top+r.height/2;if(drag.over!==f.key||drag.after!==after)setDrag({...drag,over:f.key,after})}}
+              onDrop={e=>{e.preventDefault();if(drag)move(drag.key,f.key,!!drag.after);setDrag(null)}}>
+              <span className="family-grip" aria-hidden="true" title={query?'Clear the search to reorder':'Drag to reorder'}><GripVertical size={14}/></span>
+              <button className="family-open" aria-current={selected?'true':undefined} onClick={()=>open(f)}
+                onKeyDown={e=>{if(e.altKey&&(e.key==='ArrowUp'||e.key==='ArrowDown')){e.preventDefault();nudge(f,e.key==='ArrowUp'?-1:1)}}}
+>
+                <strong>{f.name}</strong>
+                <small>{f.models.length===1?[f.models[0].quant,f.models[0].format].filter(Boolean).join(' · '):`${f.models.length} versions · ${f.formats.join(' · ')}`} · {size(f)}{issue?' · incomplete':''}</small>
+              </button>
+              {loaded&&<span className="family-loaded" title="Loaded now">Loaded</span>}
+            </li>})}
+        </ul>
+        {!visible.length&&<div className="models-empty"><p>{models.length?'No models match. Try another search or filter.':'No models found yet. Add a folder from this computer or discover a model to download.'}</p>{!models.length&&<button className="primary" onClick={props.onDiscover}><Compass size={15}/>Discover models</button>}</div>}
+        <p className="sr-only" aria-live="polite">{announce}</p>
+        <footer className="models-list-footer"><button className="icon-link" onClick={props.onRefresh}><RefreshCw size={13}/>Rescan folders</button>{visible.length>1&&!query&&<span title="Or focus a model and press Alt+↑ / Alt+↓">Drag to reorder</span>}{props.locations.length>0&&<span title={props.locations.join('\n')}>+ {props.locations.length} added location{props.locations.length===1?'':'s'}</span>}</footer>
       </aside>
-      {model?<ModelDetail key={model.id} {...props} model={model} fit={fits.get(model.id)!} siblings={models.filter(m=>familyOf(m).toLowerCase()===familyOf(model).toLowerCase()&&m.id!==model.id)} loaded={loadedId===model.id} onlyDiff={onlyDiff} setOnlyDiff={setOnlyDiff}/>:<section className="model-detail empty"><Sparkles size={30}/><h2>Your library is empty</h2><p>Discover a model to download, or add a folder that already contains models.</p></section>}
+      {model?<ModelDetail key={model.id} {...props} model={model} fit={fits.get(model.id)!} versions={families.find(f=>f.key===current)?.models||[model]} fits={fits} profileCount={profileCount} loaded={loadedId===model.id} onlyDiff={onlyDiff} setOnlyDiff={setOnlyDiff}/>:<section className="model-detail empty"><Sparkles size={30}/><h2>Your library is empty</h2><p>Discover a model to download, or add a folder that already contains models.</p></section>}
     </div>}
   </main>;
 }
 
-function ModelDetail(props:Props&{model:Model;fit:Fit;siblings:Model[];loaded:boolean;onlyDiff:boolean;setOnlyDiff:(v:boolean)=>void}) {
+function ModelDetail(props:Props&{model:Model;fit:Fit;versions:Model[];fits:Map<string,Fit>;profileCount:(id:string)=>number;loaded:boolean;onlyDiff:boolean;setOnlyDiff:(v:boolean)=>void}) {
   const {model,fit,hardware:hw,loaded,busy}=props;
   const base=props.defaults(model);
   const setups=props.profiles.filter(p=>p.settings.model_id===model.id);
@@ -148,9 +185,12 @@ function ModelDetail(props:Props&{model:Model;fit:Fit;siblings:Model[];loaded:bo
         {loaded&&<span className="loaded-note"><Check size={13}/>Loaded now</span>}
       </div>
     </header>
+    {props.versions.length>1&&<div className="version-picker" role="group" aria-label="Versions on this computer"><span>Versions on this computer <b>{props.versions.length}</b></span><div>{props.versions.map(m=>{const f=props.fits.get(m.id)!,count=props.profileCount(m.id),chosen=m.id===model.id;
+      return <button key={m.id} className={chosen?'chosen':''} aria-pressed={chosen} onClick={()=>props.onFocus(m.id)} title={`${m.name} · ${f.label}`}>
+        <span className="version-top"><FitDot fit={f}/><b>{m.quant}</b><small>{m.format}</small></span>
+        <small>{[m.variant,gb(m.bytes),count?`${count} setup${count===1?'':'s'}`:''].filter(Boolean).join(' · ')}</small></button>})}</div></div>}
     {model.issues.length>0&&<div className="model-issues" role="alert"><AlertTriangle size={16}/><span><strong>This model is incomplete and cannot load.</strong> {model.issues.slice(0,3).join(' · ')}</span></div>}
     <FitCard fit={fit} hw={hw}/>
-    {props.siblings.length>0&&<div className="sibling-versions"><span>Other versions on this computer</span>{props.siblings.map(m=>{const f=assessFit(m.bytes,expertFraction(m),hw);return <button key={m.id} onClick={()=>props.onFocus(m.id)} title={`${m.name} · ${f.label}`}><FitDot fit={f}/><b>{m.quant}</b><small>{m.format}{m.variant?` · ${m.variant}`:''} · {gb(m.bytes)}</small></button>})}</div>}
     <section className="setup-compare">
       <header><div><h3>Saved setups <span>{setups.length}</span><Hint label="saved setups" text="A setup (profile) remembers this model together with its settings. Each column is one setup; values that differ from Inflect’s defaults are highlighted."/></h3><p>{setups.length?'Compare side by side. Highlighted values differ from the defaults.':'No saved setups yet. Adjust the settings, then choose Save as profile to keep them.'}</p></div>
         <div className="setup-compare-actions">{setups.length>0&&<label className="only-diff"><input type="checkbox" checked={props.onlyDiff} onChange={e=>props.setOnlyDiff(e.target.checked)}/>Only differences</label>}<button className="secondary" disabled={busy} onClick={()=>props.onConfigure(model)}><Plus size={14}/>New setup</button></div></header>

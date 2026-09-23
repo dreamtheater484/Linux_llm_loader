@@ -86,16 +86,24 @@ def save_json(path, data):
     temporary.replace(path)
 
 
-def library_locations():
+def library_preferences():
     try:
         data = json.loads((STATE / 'library.json').read_text(encoding='utf-8'))
-        return [str(p) for p in data.get('locations', []) if isinstance(p, str)]
-    except (OSError, ValueError, AttributeError):
-        return []
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def library_locations():
+    return [str(p) for p in library_preferences().get('locations', []) if isinstance(p, str)]
+
+
+def save_library_preferences(**changes):
+    save_json(STATE / 'library.json', library_preferences() | changes)
 
 
 def save_library_locations(locations):
-    save_json(STATE / 'library.json', {'locations': locations})
+    save_library_preferences(locations=locations)
 
 
 def db():
@@ -697,6 +705,28 @@ async def restart_app(background: BackgroundTasks):
 @app.get('/api/library')
 async def library():
     return supervisor.inventory
+
+
+LIBRARY_SORTS = ('custom', 'name', 'size', 'fit', 'recent')
+
+
+class LibraryOrder(BaseModel):
+    order: list[str] = Field(default_factory=list, max_length=5000)
+    sort: Literal[LIBRARY_SORTS] = 'custom'
+
+
+@app.get('/api/library/order')
+async def library_order():
+    data = library_preferences()
+    order = [k for k in data.get('order', []) if isinstance(k, str)]
+    return dict(order=order, sort=data.get('sort') if data.get('sort') in LIBRARY_SORTS else 'custom')
+
+
+@app.put('/api/library/order')
+async def save_library_order(body: LibraryOrder):
+    order = list(dict.fromkeys(k[:300] for k in body.order))
+    save_library_preferences(order=order, sort=body.sort)
+    return dict(order=order, sort=body.sort)
 
 
 @app.post('/api/library/refresh')
