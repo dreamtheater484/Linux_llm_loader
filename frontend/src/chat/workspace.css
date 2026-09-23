@@ -33,3 +33,6 @@
 .code-lines{display:inline-flex;align-items:center;gap:5px;font:11.5px/1.5 var(--font-sans);color:var(--text-4);font-variant-numeric:tabular-nums;white-space:nowrap}
 .code-lines i{--state:var(--accent);width:6px;height:6px;border-radius:50%;background:var(--accent);animation:state-pulse 1.6s ease-in-out infinite}
 .code-block.writing .code-lines{color:var(--accent-text)}
+.preview-web{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;margin-right:4px;border:1px solid var(--line);border-radius:7px;font-size:12px;font-weight:560;color:var(--text-3);background:var(--surface)}
+.preview-web:hover{color:var(--text);background:var(--surface-2)}
+.preview-web.on{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn-text)}
