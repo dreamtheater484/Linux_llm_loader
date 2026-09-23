@@ -1224,7 +1224,10 @@ async def update_profile(profile_id: str, body: ProfileRequest):
     profile = find_profile(saved, profile_id)
     if profile.get('deleted_at'):
         raise HTTPException(409, 'Restore this profile before editing it.')
-    ensure_profile_name(saved, body.name, profile_id)
+    # Generated names leave out output, temperature and thinking, so an edited
+    # setup may share one with another setup; only chosen names must be unique.
+    if not body.auto_name:
+        ensure_profile_name(saved, body.name, profile_id)
     # Renaming a profile remains possible when its model drive is disconnected.
     if body.settings.model_dump() != profile['settings']:
         validate(body.settings, supervisor.lookup(body.settings.model_id), check_install=False)
@@ -1246,7 +1249,8 @@ async def delete_profile(profile_id: str):
 async def restore_profile(profile_id: str):
     saved = read_profiles()
     profile = find_profile(saved, profile_id)
-    ensure_profile_name(saved, profile['name'], profile_id)
+    if not profile.get('auto_name'):
+        ensure_profile_name(saved, profile['name'], profile_id)
     profile.pop('deleted_at', None)
     profile['updated_at'] = time.time()
     save_json(STATE / 'profiles.json', saved)

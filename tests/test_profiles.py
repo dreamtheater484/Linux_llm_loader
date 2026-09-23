@@ -37,6 +37,24 @@ def test_duplicate_order_and_restore_keep_independent_profiles(tmp_path):
             assert len(client.get('/api/profiles').json()) == 3
 
 
+
+def test_auto_named_profile_updates_in_place_when_its_generated_name_is_shared(tmp_path):
+    settings = Settings(model_id='test').model_dump()
+    saved = [{'id': 'a', 'name': 'Shared', 'auto_name': True, 'settings': settings},
+             {'id': 'b', 'name': 'Other', 'auto_name': True, 'settings': {**settings, 'temperature': 1.0}},
+             {'id': 'c', 'name': 'Chosen', 'settings': settings}]
+    (tmp_path / 'profiles.json').write_text(json.dumps(saved))
+    headers = {'X-Inflect-Local': '1'}
+    with patch.object(server, 'STATE', tmp_path), patch.object(server.supervisor, 'lookup', return_value=model()), patch.object(server.supervisor, 'refresh'):
+        with TestClient(server.app) as client:
+            changed = {**settings, 'temperature': 1.0, 'max_output': 0}
+            result = client.put('/api/profiles/b', json={'name': 'Shared', 'auto_name': True, 'settings': changed}, headers=headers)
+            assert result.status_code == 200
+            profiles = result.json()
+            assert len(profiles) == 3 and next(p for p in profiles if p['id'] == 'b')['settings']['max_output'] == 0
+            # A chosen name still has to be unique.
+            assert client.put('/api/profiles/b', json={'name': 'Chosen', 'settings': changed}, headers=headers).status_code == 409
+
 def test_auto_names_use_only_matching_benchmarks_and_follow_updated_settings():
     m = model()
     m.update(name='Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P', quant='Q4_K_P', engines=['gguf'])
