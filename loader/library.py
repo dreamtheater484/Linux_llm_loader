@@ -90,12 +90,18 @@ def gguf_metadata(path, tensors=False):
             ends = [offset for offset, _ in entries[1:]] + [file_size - start]
             result['_tensor_bytes'] = max(0, file_size - start)
             result['_expert_bytes'] = sum(max(0, end - offset) for (offset, name), end in zip(entries, ends) if '_exps' in name)
+            result['_ngram_bytes'] = sum(max(0, end - offset) for (offset, name), end in zip(entries, ends) if is_ngram_tensor(name))
     return result
 
 
-def safetensors_expert_bytes(weights):
-    """Bytes held by routed experts, read from safetensors headers only."""
-    total = 0
+def is_ngram_tensor(name):
+    """The per-layer n-gram lookup table, which engines keep in system RAM or on storage, never on the GPU."""
+    return 'ngram_embedding' in name or name.startswith('per_layer_token_embd')
+
+
+def safetensors_weight_split(weights):
+    """Bytes held by routed experts and by the n-gram table, read from safetensors headers only."""
+    experts = ngram = 0
     for weight in weights:
         with weight.open('rb') as f:
             size_data = f.read(8)
@@ -105,9 +111,15 @@ def safetensors_expert_bytes(weights):
             if size > 64_000_000:
                 continue
             header = json.loads(f.read(size))
-        total += sum(v['data_offsets'][1] - v['data_offsets'][0] for k, v in header.items()
-                     if k != '__metadata__' and '.experts.' in k)
-    return total
+        for k, v in header.items():
+            if k == '__metadata__':
+                continue
+            size = v['data_offsets'][1] - v['data_offsets'][0]
+            if '.experts.' in k:
+                experts += size
+            elif is_ngram_tensor(k):
+                ngram += size
+    return experts, ngram
 
 
 def gguf_quant(name):
@@ -195,9 +207,9 @@ def native_model(path, root):
                     issues.append('Receipt mismatch: ' + item['name'])
             break
     try:
-        expert_bytes = safetensors_expert_bytes(weights) if text.get('num_experts', text.get('n_routed_experts', 0)) else 0
+        expert_bytes, ngram_bytes = safetensors_weight_split(weights)
     except (OSError, ValueError, KeyError, TypeError):
-        expert_bytes = 0
+        expert_bytes = ngram_bytes = 0
     return dict(path=str(path), name=path.name, format='EXL3' if method == 'exl3' else 'Safetensors',
                 quant=quant_label, architecture=architecture, reasoning=native_reasoning(path, method == 'exl3'),
                 context=text.get('max_position_embeddings', 4096), vision=vision, mtp=mtp,
@@ -205,7 +217,7 @@ def native_model(path, root):
                 experts=text.get('num_experts', text.get('n_routed_experts', 0)),
                 layers=text.get('num_hidden_layers', 0), ngram=bool(text.get('ngram_size')),
                 bytes=sum(p.stat().st_size for p in weights), issues=list(dict.fromkeys(issues)),
-                receipt=receipt, projector=None, expert_bytes=expert_bytes,
+                receipt=receipt, projector=None, expert_bytes=expert_bytes, ngram_bytes=ngram_bytes,
                 recommended=method == 'exl3' and any(s in path.name for s in ['Flash-Next', 'Flash-0731', 'Vision-Exp']),
                 engines=['exl3'] if method == 'exl3' else ['vllm'])
 
@@ -283,11 +295,13 @@ def scan(root, extra=()):
                     continue
                 shards = [path] if not match else [path.with_name(path.name[:match.start()] + f'-{i:05d}-of-{int(match[2]):05d}.gguf') for i in range(1, int(match[2]) + 1)]
                 issues = ['Missing shard: ' + p.name for p in shards if not p.is_file()]
-                expert_bytes = meta.get('_expert_bytes', 0)
+                expert_bytes, ngram_bytes = meta.get('_expert_bytes', 0), meta.get('_ngram_bytes', 0)
                 for shard in shards[1:]:
                     if shard.is_file():
                         try:
-                            expert_bytes += gguf_metadata(shard, tensors=True).get('_expert_bytes', 0)
+                            shard_meta = gguf_metadata(shard, tensors=True)
+                            expert_bytes += shard_meta.get('_expert_bytes', 0)
+                            ngram_bytes += shard_meta.get('_ngram_bytes', 0)
                         except (OSError, ValueError, struct.error):
                             pass
                 arch = meta.get('general.architecture', 'unknown')
@@ -312,7 +326,7 @@ def scan(root, extra=()):
                     ngram=bool(meta.get(arch + '.ple.ngram_size') or meta.get(arch + '.ngram_size')),
                     bytes=sum(p.stat().st_size for p in shards if p.is_file()), issues=issues,
                     receipt=receipt, projector=projector, recommended=False, engines=['gguf'],
-                    expert_bytes=expert_bytes))
+                    expert_bytes=expert_bytes, ngram_bytes=ngram_bytes))
             except (OSError, ValueError, KeyError, struct.error) as exc:
                 errors.append(f'{path.name}: {exc}')
     for model in models:

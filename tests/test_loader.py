@@ -250,3 +250,18 @@ def test_cancel_interrupts_waiting_stream_without_unloading():
         assert supervisor.state=='ready'
     with patch.object(server.httpx,'AsyncClient',return_value=Client()):
         asyncio.run(exercise())
+
+
+def test_weight_split_separates_experts_and_ngram_table(tmp_path):
+    from loader.library import safetensors_weight_split
+    def write(name, tensors):
+        header, offset = {}, 0
+        for key, size in tensors.items():
+            header[key] = {'dtype': 'U8', 'shape': [size], 'data_offsets': [offset, offset + size]}
+            offset += size
+        data = json.dumps(header).encode()
+        (tmp_path / name).write_bytes(len(data).to_bytes(8, 'little') + data + b'\0' * offset)
+        return tmp_path / name
+    weights = [write('model.safetensors', {'model.layers.0.mlp.experts.0.up.weight': 300, 'model.layers.0.attn.q.weight': 50}),
+               write('ngram_embedding.safetensors', {'model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.trellis': 700})]
+    assert safetensors_weight_split(weights) == (300, 700)

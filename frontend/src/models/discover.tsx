@@ -9,7 +9,7 @@ import {FitDot, engineName} from './library';
 type Request = (path:string, body?:unknown, method?:string) => Promise<any>;
 type EngineInfo = {id:string;name:string;installed:boolean;discoverable:boolean;formats:string[];architectures:string[]|null};
 type Family = {key:string;name:string;title:string;params:number|null;active_b:number|null;context:number|null;engines:string[];repos:number;downloads:number;owners:string[];variants:number};
-type Option = {id:string;repo:string;owner:string;variant:string;engine:string;format:string;quant:string;revision:string;size:number;weight_bytes:number;vision:boolean;mtp:boolean;gated:boolean;downloads:number;file_count:number;folder:string;title:string};
+type Option = {id:string;repo:string;owner:string;variant:string;engine:string;format:string;quant:string;revision:string;size:number;weight_bytes:number;ngram_bytes?:number;ngram_estimated?:boolean;vision:boolean;mtp:boolean;gated:boolean;downloads:number;file_count:number;folder:string;title:string};
 type FamilyDetail = {key:string;name:string;title:string;base_model:string|null;params:number|null;active_b:number|null;expert_fraction:number|null;context:number|null;vision:boolean;engines:string[];options:Option[]};
 export type Job = {id:string;title:string;family:string;repo:string;owner:string;variant:string;quant:string;engine:string;format:string;folder:string;total:number;done:number;verified:number;speed:number|null;eta:number|null;state:string;error:string|null;note:string|null;file_count:number;model_id?:string|null;vision?:boolean};
 
@@ -95,7 +95,7 @@ function FamilyView({family,hw,jobs,request,onJobs,onBack,diskFree,localRepos}:{
   const [engine,setEngine]=useState('all'),[owner,setOwner]=useState(''),[variant,setVariant]=useState(''),[quant,setQuant]=useState(''),[runsWell,setRunsWell]=useState(true),[sort,setSort]=useState<Sort>('fit');
   const [starting,setStarting]=useState<string|null>(null),[error,setError]=useState(''),[limit,setLimit]=useState(40);
   const experts=familyExperts(family);
-  const rated=useMemo(()=>family.options.map(o=>({o,fit:assessFit(o.size,experts,hw),bits:bits(o,family.params)})),[family,hw.vram,hw.ram]);
+  const rated=useMemo(()=>family.options.map(o=>({o,fit:assessFit(o.size,experts,hw,o.ngram_bytes||0),bits:bits(o,family.params)})),[family,hw.vram,hw.ram]);
   const scoped=rated.filter(({o})=>(engine==='all'||o.engine===engine));
   const owners=[...new Set(scoped.map(r=>r.o.owner))].sort((a,b)=>scoped.filter(r=>r.o.owner===b).reduce((n,r)=>Math.max(n,r.o.downloads),0)-scoped.filter(r=>r.o.owner===a).reduce((n,r)=>Math.max(n,r.o.downloads),0));
   const variants=[...new Set(scoped.filter(r=>!owner||r.o.owner===owner).map(r=>r.o.variant))].sort((a,b)=>a==='Original'?-1:b==='Original'?1:a.localeCompare(b));

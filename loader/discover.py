@@ -455,6 +455,7 @@ class Discovery:
                 record = dict(id=identity, repo=member['repo'], owner=member['owner'], variant=member['variant'] or 'Original',
                               engine=member['engine'], format=member['format'], quant=option['quant'],
                               revision=revision, commit=commit, size=total, weight_bytes=option['weight_bytes'],
+                              ngram_bytes=sum(f['size'] for f in option['files'] if 'ngram' in f['rfilename'].lower()),
                               vision=option['vision'], mtp=bool(re.search(r'(?i)(?:^|[-_ ])mtp(?:$|[-_ ])', member['name'])),
                               gated=member['gated'], downloads=member['downloads'], architecture=member.get('architecture'),
                               files=[dict(path=f['rfilename'], size=f['size'], sha256=(f.get('lfs') or {}).get('sha256'),
@@ -480,6 +481,12 @@ class Discovery:
             expert_fraction = max(0, 1 - active_billions(name) * 1e9 / total_params)
         elif facts.get('expert_params') is not None and not facts.get('expert_params') and config:
             expert_fraction = 0
+        # GGUF files embed the n-gram table, so borrow its size from this family's EXL3 downloads.
+        tables = [o['ngram_bytes'] for o in options if o.get('ngram_bytes')]
+        if tables:
+            for o in options:
+                if o['engine'] == 'gguf' and not o.get('ngram_bytes'):
+                    o.update(ngram_bytes=int(statistics.median(tables)), ngram_estimated=True)
         now = time.time()
         for stale in [k for k, (t, _) in self.options.items() if now - t > 3 * CACHE_SECONDS]:
             self.options.pop(stale, None)

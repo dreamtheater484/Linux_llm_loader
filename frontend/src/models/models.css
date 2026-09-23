@@ -344,3 +344,4 @@ a.fact.link:hover{border-color:var(--accent-line);color:var(--accent-text)}
 
 .gated-icon{margin-left:5px;vertical-align:-1px;color:var(--warn-text)}
 button.hub-chip{cursor:pointer}button.hub-chip:hover{border-color:var(--line-strong)}.hub-chip.off{opacity:1}.hub-chip.off svg{color:var(--text-4)}
+.memory-plan small.plan-note{color:var(--text-4)}
