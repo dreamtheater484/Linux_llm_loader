@@ -63,7 +63,10 @@ def test_config_snapshot_archive_and_score(tmp_path, monkeypatch):
         assert 'local subset' in report.lower()
         mgr.artifact(0, 'outside.txt', 'original')
         root = mgr.root / result['id']
-        (root / 'unsafe-link').symlink_to(tmp_path / 'profiles.json')
+        try:
+            (root / 'unsafe-link').symlink_to(tmp_path / 'profiles.json')
+        except OSError:
+            pass  # Windows needs Developer Mode or administrator rights to create symlinks.
         with zipfile.ZipFile(mgr.archive(result['id'])) as archive:
             assert 'unsafe-link' not in archive.namelist()
             assert {'report.md', 'report.json', 'task-01/solution.py'} <= set(archive.namelist())

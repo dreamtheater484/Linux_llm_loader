@@ -21,7 +21,7 @@ The suite covers:
 - template-specific reasoning choices, legacy profile migration, matching token-count/generation controls, and changing effort per request without changing loaded settings;
 - Windows model-download planning, resumption, integrity checks, and bounded failures.
 
-The Windows-only PowerShell integration test is skipped on Linux. Local HTTP transfer tests use a temporary loopback server and do not download models.
+Windows-only checks (job objects, junctions, the PowerShell installer) are skipped on Linux, and Linux-only fixtures (sysfs power sensors, the Bash installer) on Windows. On Windows, run the suite as described in [WINDOWS.md](WINDOWS.md#tests). Local HTTP transfer tests use a temporary loopback server and do not download models.
 
 The manager environment also runs the app tests. To run the entire suite there, install the development-only `pytest`, `filelock`, and `huggingface-hub` dependencies in a separate test environment or target directory; they are used by the downloader tests, not by benchmark inference.
 

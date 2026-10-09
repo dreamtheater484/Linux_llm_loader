@@ -1,6 +1,8 @@
 # Inflect · local model workbench
 
-Inflect is a local Ubuntu interface for running large language models with a small set of understandable controls. It ships a qualified **ExLlamaV3 1.5.0 + TabbyAPI** path for EXL3 checkpoints and an optional pinned **llama.cpp b11050 / CUDA 12.8** runtime for GGUF models, including embedded Qwen MTP. The vLLM safetensors adapter still requires separate installation and qualification.
+Inflect is a local interface for Ubuntu and Windows for running large language models with a small set of understandable controls. It ships a qualified **ExLlamaV3 1.5.0 + TabbyAPI** path for EXL3 checkpoints and an optional pinned **llama.cpp b11050 / CUDA 12.8** runtime for GGUF models, including embedded Qwen MTP. The vLLM safetensors adapter still requires separate installation and qualification.
+
+On Windows, the same engines and profiles run natively; see [Inflect on Windows](WINDOWS.md) for installation and for importing profiles from Linux.
 
 The interface includes streaming text and image chat, 256K context profiles, Q8/FP16/Q4 KV choices, vision and MTP controls, saved profiles, repeatable benchmarks, and live GPU power, CPU package power, VRAM, RAM, CPU load, prompt-processing speed, decode speed, and first-token time.
 
@@ -317,6 +319,8 @@ This checks schema visibility, streaming and non-streaming calls, reasoning off/
 | Desktop shortcut | `~/.local/share/applications/inflect.desktop` |
 | Model files | The directory supplied with `--model-dir` |
 
+Windows uses `%LOCALAPPDATA%\Inflect` and `%APPDATA%\inflect` instead; see [Inflect on Windows](WINDOWS.md#where-things-live).
+
 Machine configuration, logs, profiles, benchmark results, CUDA reports, model files, credentials, `.env` files, and private keys are excluded from Git. Internal engine keys are generated for each run, stored with owner-only permissions, and removed from displayed logs. Chats, drafts and attachments persist in the local conversation database until explicitly deleted.
 
 ## Configuration and moving files
@@ -351,6 +355,8 @@ The repository keeps test procedures rather than machine-generated reports. See 
 ```bash
 ~/.local/share/linux-llm-loader/exl3/bin/python -m pytest -q
 ```
+
+On Windows, see [the Windows test command](WINDOWS.md#tests).
 
 The production frontend is committed, so Node is unnecessary for normal installation. To change the interface, use Node.js 22.20+ or 24.12+ and pnpm 11:
 

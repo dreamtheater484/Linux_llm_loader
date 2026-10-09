@@ -7,13 +7,20 @@ import time
 from collections import deque
 import psutil
 
+from inflect_platform import WINDOWS, hidden
+
 
 RAM_ACCOUNTING = 'physical_including_cache_v1'
+# Windows has no proportional set size; a working set counts shared pages in full.
+WORKING_SET_ACCOUNTING = 'process_tree_working_set'
+MODEL_ACCOUNTING = WORKING_SET_ACCOUNTING if WINDOWS else 'process_tree_pss'
 
 
 def system_memory(vm=None):
     """Physical occupancy, not memory pressure. Linux cached includes reclaimable slab."""
     vm = psutil.virtual_memory() if vm is None else vm
+    if WINDOWS:
+        return windows_system_memory(vm)
     occupied = max(0, vm.total - vm.free)
     cache = min(occupied, max(0, vm.cached + vm.buffers - vm.shared))
     return dict(used_bytes=occupied, total_bytes=vm.total, free_bytes=vm.free,
@@ -21,8 +28,57 @@ def system_memory(vm=None):
                 non_cache_bytes=occupied - cache, accounting=RAM_ACCOUNTING)
 
 
+def windows_system_memory(vm, lists=None):
+    """The same physical-occupancy accounting from Windows' page lists.
+
+    Free = free + zero lists; cache = standby (reclaimable) + modified (dirty) pages.
+    Available stays Windows' own figure (free + standby)."""
+    if lists is None:
+        from .windows_metrics import memory_lists
+        lists = memory_lists()
+    if lists is None:
+        used = max(0, vm.total - vm.available)
+        return dict(used_bytes=used, total_bytes=vm.total, free_bytes=vm.available, available_bytes=vm.available,
+                    cache_bytes=None, non_cache_bytes=None, accounting='legacy_total_minus_available')
+    free = min(vm.total, lists['free'])
+    occupied = vm.total - free
+    cache = min(occupied, lists['standby'] + lists['modified'])
+    return dict(used_bytes=occupied, total_bytes=vm.total, free_bytes=free,
+                available_bytes=vm.available, cache_bytes=cache,
+                non_cache_bytes=occupied - cache, accounting=RAM_ACCOUNTING)
+
+
+def windows_process_memory(pid, read=None):
+    """Engine + worker working sets. Private pages are anonymous; the shareable
+    remainder is mostly mapped model files and DLLs. Windows reports no
+    per-process swapped or shared-memory figure, so those stay unknown."""
+    if read is None:
+        from .windows_metrics import process_counters as read
+    try:
+        root = psutil.Process(pid)
+        processes = [root, *root.children(recursive=True)]
+        totals = dict(resident_bytes=0, anonymous_bytes=0, file_bytes=0)
+        for process in processes:
+            values = read(process.pid)
+            if values is None:
+                if process.pid == pid:
+                    return None
+                continue  # A worker exited during the snapshot.
+            totals['resident_bytes'] += values['working_set']
+            totals['anonymous_bytes'] += values['private_working_set']
+            totals['file_bytes'] += max(0, values['working_set'] - values['private_working_set'])
+        if not root.is_running():
+            return None
+        return dict(**totals, shared_bytes=None, swap_bytes=None, pid=pid, sampled_at=time.time(),
+                    accounting=WORKING_SET_ACCOUNTING)
+    except (OSError, ValueError, psutil.Error):
+        return None
+
+
 def process_memory(pid, proc_root=Path('/proc')):
     """Resident engine + worker memory, proportionally counting shared pages (PSS)."""
+    if WINDOWS:
+        return windows_process_memory(pid)
     try:
         root = psutil.Process(pid)
         processes = [root, *root.children(recursive=True)]
@@ -56,7 +112,7 @@ def memory_peaks(samples):
     return dict(ram_bytes=peak('ram', 'used_bytes'), ram_accounting=RAM_ACCOUNTING,
                 ram_cache_bytes=peak('ram', 'cache_bytes'), ram_non_cache_bytes=peak('ram', 'non_cache_bytes'),
                 model_ram_bytes=peak('model_memory', 'resident_bytes'),
-                model_file_bytes=peak('model_memory', 'file_bytes'), model_ram_accounting='process_tree_pss')
+                model_file_bytes=peak('model_memory', 'file_bytes'), model_ram_accounting=MODEL_ACCOUNTING)
 
 
 def annotate_memory(value):
@@ -89,6 +145,8 @@ class CpuPower:
         self.previous = {}
 
     def sample(self, now=None):
+        if WINDOWS:
+            return self.windows_sample()
         now = time.monotonic() if now is None else now
         readings, packages = [], 0
         for zone in (self.sysfs / 'class/powercap').glob('intel-rapl:*'):
@@ -134,6 +192,17 @@ class CpuPower:
         return dict(watts=None, source=None, detail='Package sensor unavailable',
                     error='No readable CPU package-power sensor. Values are never estimated from CPU usage.')
 
+    @staticmethod
+    def windows_sample(read=None):
+        """Windows exposes the same RAPL package counter (Intel and AMD) as an Energy Meter."""
+        if read is None:
+            from .windows_metrics import cpu_package_watts as read
+        watts = read()
+        if watts is not None and 0 <= watts < 2000:
+            return dict(watts=watts, source='Windows RAPL', detail='CPU package · Energy Meter counter', error=None)
+        return dict(watts=None, source=None, detail='Package sensor unavailable',
+                    error='No readable CPU package-power counter. Values are never estimated from CPU usage.')
+
 
 def parse_gpu(output):
     row = next(csv.reader(io.StringIO(output)), [])
@@ -175,7 +244,8 @@ class Telemetry:
             try:
                 proc = await asyncio.create_subprocess_exec('nvidia-smi', '--id=0',
                     '--query-gpu=name,memory.used,memory.total,utilization.gpu,power.draw,power.limit,temperature.gpu,driver_version,pcie.link.gen.current',
-                    '--format=csv,noheader,nounits', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    '--format=csv,noheader,nounits', stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **hidden())
                 out, err = await asyncio.wait_for(proc.communicate(), 3)
                 if proc.returncode:
                     raise ValueError(err.decode().strip() or out.decode().strip())

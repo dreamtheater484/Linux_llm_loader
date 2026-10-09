@@ -8,15 +8,17 @@ from pathlib import Path
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from inflect_platform import (WINDOWS, default_runtime, hidden, large_pages_available, program, site_packages,
+                              venv_python, venv_root)
 from .reasoning import ReasoningEffort, reasoning_kwargs
 from .tool_calls import native_tool_format
 from .llama_cpp import runtime_info
 
 PROJECT = Path(__file__).resolve().parents[1]
-RUNTIME = Path(os.environ.get('INFLECT_RUNTIME', Path.home() / '.local/share/linux-llm-loader'))
-EXL_PYTHON = Path(os.environ.get('INFLECT_EXL_PYTHON', RUNTIME / 'exl3/bin/python')).expanduser()
+RUNTIME = Path(os.environ.get('INFLECT_RUNTIME', default_runtime()))
+EXL_PYTHON = Path(os.environ.get('INFLECT_EXL_PYTHON', venv_python(RUNTIME / 'exl3'))).expanduser()
 VLLM = RUNTIME / 'vllm/bin/vllm'
-GGUF = Path(os.environ.get('INFLECT_GGUF_SERVER', RUNTIME / 'llama/bin/llama-server'))
+GGUF = Path(os.environ.get('INFLECT_GGUF_SERVER', program(RUNTIME / 'llama/bin/llama-server')))
 _configured_tabby = os.environ.get('INFLECT_TABBY')
 _legacy_tabby = PROJECT / '.runtime/sources/tabbyAPI'
 TABBY = Path(_configured_tabby).expanduser() if _configured_tabby else RUNTIME / 'sources/tabbyAPI'
@@ -65,11 +67,12 @@ class Settings(BaseModel):
 
 @lru_cache(maxsize=8)
 def exl_version(python, tabby, signature):
-    sites = list((Path(python).parent.parent / 'lib').glob('python*/site-packages'))
+    sites = [str(site) for site in site_packages(venv_root(python))]
     packages = {dist.metadata['Name'].lower(): dist.version for dist in importlib.metadata.distributions(path=sites)}
     version = packages.get('exllamav3')
     try:
-        revision = subprocess.check_output(['git', '-C', tabby, 'rev-parse', '--short=8', 'HEAD'], text=True, timeout=3).strip()
+        revision = subprocess.check_output(['git', '-C', tabby, 'rev-parse', '--short=8', 'HEAD'], text=True, timeout=3,
+                                           stdin=subprocess.DEVNULL, **hidden()).strip()
     except (OSError, subprocess.SubprocessError):
         revision = 'unknown'
     ready = Path(python).is_file() and (Path(tabby) / 'main.py').is_file() and bool(version)
@@ -79,7 +82,7 @@ def exl_version(python, tabby, signature):
 
 def engine_inventory():
     signature = tuple((str(path), path.stat().st_mtime_ns) for path in
-                      [*EXL_PYTHON.parent.parent.glob('lib/python*/site-packages/exllamav3-*.dist-info'),
+                      [*(info for site in site_packages(venv_root(EXL_PYTHON)) for info in site.glob('exllamav3-*.dist-info')),
                        TABBY / '.git/HEAD', TABBY / '.git/logs/HEAD'] if path.exists())
     return [dict(id='exl3', name='ExLlamaV3', **exl_version(str(EXL_PYTHON), str(TABBY), signature), formats=['EXL3']),
             dict(id='vllm', name='vLLM', installed=VLLM.is_file(), version='Not installed' if not VLLM.is_file() else 'Local runtime', formats=['Safetensors']),
@@ -121,8 +124,18 @@ def launch(settings, model, run_dir, port, token):
     private_cc = RUNTIME / 'toolchain/usr/bin/x86_64-linux-gnu-gcc-15'
     if private_cc.is_file():
         env['CC'] = str(private_cc)
-    env.update(PYTHONUNBUFFERED='1', TOKENIZERS_PARALLELISM='false', OMP_NUM_THREADS=str(settings.cpu_threads),
-               EXL3_MOE_PINNED_ARENA='1', EXL3_HOST_MEM_RESERVE_MB='16384')
+    env.update(PYTHONUNBUFFERED='1', TOKENIZERS_PARALLELISM='false', OMP_NUM_THREADS=str(settings.cpu_threads))
+    # ExLlamaV3 tuning defaults; the same variables set in Inflect's environment take precedence.
+    # Windows backs the pinned (shared) expert arena with a pagefile section that cannot use
+    # large pages; with "Lock pages in memory" granted, the private arena gets 2 MiB pages,
+    # which the CPU experts need far more than prefill needs zero-copy DMA.
+    env.setdefault('EXL3_MOE_PINNED_ARENA', '0' if WINDOWS and large_pages_available() else '1')
+    env.setdefault('EXL3_HOST_MEM_RESERVE_MB', '16384')
+    if WINDOWS:
+        # Tabby reads YAML, templates and model cards as text: never in the ANSI code page.
+        # triton-windows compiles its launchers with its bundled TinyCC, so CC stays unset.
+        env.update(PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
+        env.setdefault('TRITON_CACHE_DIR', str(RUNTIME / 'cache/triton'))
     if engine == 'exl3':
         import yaml
         cpu_experts = min(model['experts'], math.ceil(model['experts'] * settings.cpu_percent / 100 / 8) * 8)

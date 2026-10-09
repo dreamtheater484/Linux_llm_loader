@@ -3,5 +3,25 @@
   "package_version": "1.5.0+cu128.torch2.9.0",
   "tabby_revision": "53da7919d4e45c63f4acbcbbc00cbe0f60a1ce65",
   "torch": "2.9.0+cu128",
-  "python": "3.12"
+  "python": "3.12",
+  "platforms": {
+    "linux": {
+      "wheel": "exllamav3-1.5.0+cu128.torch2.9.0-cp312-cp312-linux_x86_64.whl",
+      "wheel_sha256": "d8f5b483ca882c52d79a73c059b508c666663a68b4c60e420ca489e654e8104a",
+      "torch_wheel": "https://download.pytorch.org/whl/cu128/torch-2.9.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=87c62d3b95f1a2270bd116dbd47dc515c0b2035076fbb4a03b4365ea289e89c4",
+      "dependencies": "runtime-locks/exl3-dependencies.txt",
+      "extra_index_url": "https://pypi.nvidia.com",
+      "site_patches": ["patches/exl3-cumulative-output-tokens.patch"]
+    },
+    "windows": {
+      "version": "1.5.4",
+      "package_version": "1.5.4+cu128.torch2.9.0",
+      "wheel": "exllamav3-1.5.4+cu128.torch2.9.0-cp312-cp312-win_amd64.whl",
+      "wheel_sha256": "7b777483d0fc9c4828ad6862d50804cc2e6868fbb994bd15bb0eb85308020d66",
+      "torch_wheel": "https://download.pytorch.org/whl/cu128/torch-2.9.0%2Bcu128-cp312-cp312-win_amd64.whl#sha256=c97dc47a1f64745d439dd9471a96d216b728d528011029b4f9ae780e985529e0",
+      "dependencies": "runtime-locks/exl3-dependencies-windows.txt",
+      "site_patches": [],
+      "reason": "1.5.0 disables the pinned expert arena on Windows (fixed in 1.5.1) and needs ~1 GiB more VRAM than Windows leaves free for the 60% Qwen3.8 Flash Next profile; 1.5.4 fits it and already contains the cumulative output-token fix. Qualified with TabbyAPI 53da7919: chat, streaming, vision, MTP, speed test and verify_tool_calls.py (20/20)."
+    }
+  }
 }

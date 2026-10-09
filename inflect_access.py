@@ -2,9 +2,16 @@
 import ipaddress
 import json
 import subprocess
+import time
+
+from inflect_platform import WINDOWS, hidden
 
 PRIVATE_LANS = tuple(ipaddress.ip_network(value) for value in
                      ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+VIRTUAL_PREFIXES = ('lo', 'docker', 'br-', 'veth', 'tun', 'tap', 'wg', 'tailscale')
+WINDOWS_VIRTUAL = ('loopback', 'vethernet', 'docker', 'tailscale', 'zerotier', 'wireguard', 'openvpn',
+                   'nordlynx', 'vpn', 'virtualbox', 'vmware', 'npcap', 'bluetooth')
+_windows_cache = (0.0, None)
 
 
 def private_lan(host, subnet):
@@ -24,6 +31,8 @@ def lan_interfaces():
     Do not accidentally publish on Docker bridges, VPNs or wildcard addresses.
     Missing iproute2 or a public-only connection fails closed to loopback.
     """
+    if WINDOWS:
+        return windows_lan_interfaces()
     try:
         def read(*args):
             return json.loads(subprocess.check_output(['ip', '-json', *args], text=True, timeout=3))
@@ -31,7 +40,7 @@ def lan_interfaces():
         result = []
         for route in routes:
             device = route.get('dev', '')
-            if not device or device.startswith(('lo', 'docker', 'br-', 'veth', 'tun', 'tap', 'wg', 'tailscale')):
+            if not device or device.startswith(VIRTUAL_PREFIXES):
                 continue
             for interface in read('-4', 'address', 'show', 'dev', device):
                 for item in interface.get('addr_info', []):
@@ -44,6 +53,51 @@ def lan_interfaces():
         return result
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return []
+
+
+WINDOWS_QUERY = (
+    "$r=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
+    "Select-Object ifIndex,InterfaceAlias,RouteMetric,InterfaceMetric);"
+    "$a=@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+    "Select-Object ifIndex,IPAddress,PrefixLength,AddressState);"
+    "ConvertTo-Json -Compress -Depth 3 @{routes=$r;addresses=$a}")
+
+
+def windows_lan_interfaces(output=None):
+    """Windows equivalent of the iproute2 query: default-route adapters and their
+    preferred IPv4 addresses. Hyper-V/WSL switches, VPNs and link-local addresses
+    never qualify. Cached briefly because PowerShell takes about half a second."""
+    global _windows_cache
+    if output is None:
+        stamp, cached = _windows_cache
+        if cached is not None and time.monotonic() - stamp < 10:
+            return [dict(row) for row in cached]
+        try:
+            output = subprocess.check_output(['powershell', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_QUERY],
+                                             text=True, timeout=10, stdin=subprocess.DEVNULL, **hidden())
+        except (OSError, subprocess.SubprocessError):
+            return []
+    try:
+        data = json.loads(output)
+        rows = lambda key: data.get(key) if isinstance(data.get(key), list) else [data[key]] if data.get(key) else []
+        routes = sorted(rows('routes'), key=lambda row: (row.get('RouteMetric') or 0) + (row.get('InterfaceMetric') or 0))
+        addresses = rows('addresses')
+        result = []
+        for route in routes:
+            name = route.get('InterfaceAlias') or ''
+            if not name or any(word in name.lower() for word in WINDOWS_VIRTUAL):
+                continue
+            for item in addresses:
+                host = item.get('IPAddress', '')
+                if item.get('ifIndex') != route.get('ifIndex') or item.get('AddressState') != 4:  # 4 = Preferred
+                    continue
+                network = str(ipaddress.ip_network(f"{host}/{item['PrefixLength']}", strict=False))
+                if private_lan(host, network) and not any(row['host'] == host for row in result):
+                    result.append(dict(name=name, host=host, subnet=network))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return []
+    _windows_cache = (time.monotonic(), [dict(row) for row in result])
+    return result
 
 
 def access_config(config, interfaces=None):

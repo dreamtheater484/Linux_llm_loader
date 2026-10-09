@@ -2,7 +2,6 @@
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager, suppress
-import fcntl
 import ipaddress
 import json
 import math
@@ -13,7 +12,6 @@ import secrets
 import shutil
 import shlex
 import getpass
-import signal
 import socket
 import sqlite3
 import statistics
@@ -47,7 +45,10 @@ from . import discover as hub
 from .discover import Discovery, engine_support
 from .downloads import DownloadManager
 from inflect_access import access_config, lan_interfaces, private_lan
+from inflect_platform import (WINDOWS, ProcessTree, append_log, lock as lock_file, owned, repair_proactor_shutdown,
+                              replace_file, request_shutdown, spawn_detached)
 
+repair_proactor_shutdown()
 MODEL_ROOT = Path(os.environ.get('INFLECT_MODEL_ROOT', Path.home() / 'models')).expanduser()
 STATE = Path(os.environ.get('INFLECT_STATE', RUNTIME / 'state'))
 PORT = int(os.environ.get('INFLECT_PORT', '7860'))
@@ -83,7 +84,7 @@ def origin_allowed(origin):
 def save_json(path, data):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    replace_file(temporary, path)
 
 
 def library_preferences():
@@ -118,6 +119,7 @@ class Supervisor:
         self.state = 'idle'
         self.error = None
         self.proc = None
+        self.tree = None
         self.task = None
         self.reader = None
         self.settings = None
@@ -187,21 +189,26 @@ class Supervisor:
         self.memory_preparation = None
 
     async def _terminate(self):
-        proc = self.proc
+        proc, tree = self.proc, self.tree
         if proc:
-            # Every child starts its own process group. Never touch unrelated servers.
+            tree = tree or ProcessTree(proc.pid)
+            # Every child starts its own process group (a job object on Windows).
+            # Never touch unrelated servers.
             with suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGTERM)
+                tree.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), 12)
             except asyncio.TimeoutError:
                 with suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    tree.kill()
                 await proc.wait()
             # A worker may survive a crashed parent; clear its owned group as well.
             with suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-        self.proc = None
+                tree.kill()
+            # The next load checks free RAM and VRAM: wait until the whole tree has released them.
+            await asyncio.to_thread(tree.wait, 60)
+            tree.close()
+        self.proc = self.tree = None
         if self.reader:
             with suppress(asyncio.CancelledError):
                 await self.reader
@@ -216,7 +223,8 @@ class Supervisor:
             model = self.lookup(settings.model_id)
             engine = validate(settings, model)
             if telemetry.value.get('gpu') is None:
-                raise ValueError('CUDA GPU access is unavailable. See the hardware status and launch from Ubuntu.')
+                raise ValueError('CUDA GPU access is unavailable. See the hardware status and check the NVIDIA driver.'
+                                 if WINDOWS else 'CUDA GPU access is unavailable. See the hardware status and launch from Ubuntu.')
             await self._stop()
             self.model, self.settings, self.engine = model, settings, engine
             self.state, self.error = 'loading', None
@@ -227,7 +235,7 @@ class Supervisor:
             self.task = asyncio.create_task(self._load())
 
     async def _read_logs(self, proc, log_path):
-        with log_path.open('a', encoding='utf-8') as log:
+        with log_path.open('a', encoding='utf-8', newline='\n') as log:
             while line := await proc.stdout.readline():
                 text = line.decode('utf-8', errors='replace').rstrip()
                 if self.token:
@@ -272,8 +280,9 @@ class Supervisor:
                     'CUDA_VISIBLE_DEVICES', 'TOKENIZERS_PARALLELISM')})
             self.tool_format = requested.get('model', {}).get('tool_format') if self.engine == 'exl3' else requested.get('tool_format')
             save_json(run_dir / 'profile.json', self.settings.model_dump())
-            self.proc = await asyncio.create_subprocess_exec(*args, cwd=run_dir, env=env, start_new_session=True,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=2**20)
+            self.proc = await asyncio.create_subprocess_exec(*args, cwd=run_dir, env=env, **owned(),
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=2**20)
+            self.tree = ProcessTree(self.proc.pid)
             self.reader = asyncio.create_task(self._read_logs(self.proc, run_dir / 'engine.log'))
             deadline = time.monotonic() + 1800
             async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
@@ -542,7 +551,7 @@ async def lifespan(app):
     STATE.chmod(0o700)
     lock = (STATE / 'manager.lock').open('a')
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file(lock, blocking=False)
     except BlockingIOError:
         raise RuntimeError('Inflect is already running.')
     with db():
@@ -703,13 +712,13 @@ async def restart_app(background: BackgroundTasks):
                     'INFLECT_PORT', 'INFLECT_MODEL_ROOT', 'INFLECT_GGUF_SERVER', 'INFLECT_EXL_PYTHON', 'INFLECT_TABBY'):
             environment.pop(key, None)
         environment['INFLECT_CONFIG_FILE'] = str(app_settings.config_path())
-        with (STATE / 'manager.log').open('a') as log:
-            subprocess.Popen([sys.executable, str(PROJECT / 'launch.py'), '--no-browser', '--wait-for-pid', str(os.getpid())],
-                             cwd=PROJECT, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        with append_log(STATE / 'manager.log') as log:
+            spawn_detached([sys.executable, str(PROJECT / 'launch.py'), '--no-browser', '--wait-for-pid', str(os.getpid())],
+                           cwd=PROJECT, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         restarting = True
     async def shutdown_for_restart():
         await asyncio.sleep(.5)
-        os.kill(os.getpid(), signal.SIGTERM)
+        request_shutdown()
     background.add_task(shutdown_for_restart)
     return dict(status='restarting', url=next_state['next_url'])
 
@@ -778,7 +787,11 @@ async def browse_library(path: str = Query('', max_length=4096)):
         raise ValueError('That folder is unavailable. Check the path or choose another place.')
     folder = folder.resolve()
     shortcuts = [dict(name='Home', path=str(Path.home())), dict(name='Model folder', path=str(MODEL_ROOT))]
-    for mounts in (Path('/run/media') / getpass.getuser(), Path('/media') / getpass.getuser(), Path('/mnt')):
+    if WINDOWS:
+        # Mounted volumes only: an empty card reader must not stall the browser.
+        drives = [p.mountpoint for p in psutil.disk_partitions() if p.fstype and 'cdrom' not in p.opts]
+        shortcuts += [dict(name=drive.rstrip('\\'), path=drive) for drive in drives][:12]
+    for mounts in () if WINDOWS else (Path('/run/media') / getpass.getuser(), Path('/media') / getpass.getuser(), Path('/mnt')):
         if mounts.is_dir():
             shortcuts += [dict(name=m.name, path=str(m)) for m in sorted(mounts.iterdir()) if m.is_dir()][:8]
     entries = await asyncio.to_thread(model_entries, folder)
@@ -957,7 +970,7 @@ async def quit_app(background: BackgroundTasks):
     await supervisor.stop()
     async def shutdown():
         await asyncio.sleep(0.3)
-        os.kill(os.getpid(), signal.SIGTERM)
+        request_shutdown()
     background.add_task(shutdown)
     return {'status': 'closed'}
 
@@ -1089,7 +1102,7 @@ class ProfileRequest(BaseModel):
 
 def read_profiles():
     path = STATE / 'profiles.json'
-    saved = json.loads(path.read_text()) if path.exists() else []
+    saved = json.loads(path.read_text(encoding='utf-8')) if path.exists() else []
     changed = False
     for profile in saved:
         settings = Settings.model_validate(profile['settings']).model_dump()
@@ -1317,6 +1330,8 @@ async def manage_archive(body: ArchiveAction):
 
 @app.get('/api/evaluations/install-instructions')
 async def evaluation_install_instructions():
+    if WINDOWS:
+        return {'command': 'winget install --exact --id Docker.DockerDesktop'}
     return {'command': shlex.join(['pkexec', '/bin/bash', str(PROJECT / 'scripts/install-benchmark-docker.sh'), '--user', getpass.getuser()])}
 
 

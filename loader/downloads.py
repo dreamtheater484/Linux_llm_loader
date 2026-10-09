@@ -19,6 +19,7 @@ from urllib.parse import quote
 
 import httpx
 
+from inflect_platform import O_BINARY, make_sparse, pwrite, replace_file
 from .discover import HUB, hub_headers
 
 GIB = 2**30
@@ -82,7 +83,7 @@ class DownloadManager:
         self.last_save = now
         temporary = self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps(self.jobs, indent=1), encoding='utf-8')
-        temporary.replace(self.path)
+        replace_file(temporary, self.path)
 
     def public(self, job):
         return {k: job.get(k) for k in PUBLIC} | {'note': job.get('note'), 'model_id': job.get('model_id')}
@@ -224,7 +225,7 @@ class DownloadManager:
             destination = self.root / job['folder']
             if destination.exists():
                 raise Permanent(f'A folder named {job["folder"]} appeared while downloading. Rename it and retry.')
-            await asyncio.to_thread(os.replace, staging, destination)
+            await asyncio.to_thread(replace_file, staging, destination)
             with suppress(OSError):
                 staging.parent.rmdir()
             self.write_receipt(job)
@@ -279,10 +280,11 @@ class DownloadManager:
             step = math.ceil(size / count) if size else 0
             segments = [[i * step, min(size, (i + 1) * step) - 1, i * step] for i in range(count)] if size else []
             with part.open('wb') as f:
+                make_sparse(f.fileno())
                 f.truncate(size)
         self.credit(job, entry, sum(s[2] - s[0] for s in segments))
         url = f"{HUB}/{job['repo']}/resolve/{job['commit']}/{quote(entry['path'], safe='/')}"
-        fd = os.open(part, os.O_RDWR)
+        fd = os.open(part, os.O_RDWR | O_BINARY)
         try:
             async def persist():
                 await asyncio.to_thread(os.fsync, fd)
@@ -308,7 +310,7 @@ class DownloadManager:
                                 if not chunk:
                                     break
                                 # Synchronous on purpose: a cancelled thread must never write after close.
-                                os.pwrite(fd, chunk, segment[2])
+                                pwrite(fd, chunk, segment[2])
                                 segment[2] += len(chunk)
                                 self.credit(job, entry, len(chunk), add=True)
                         failures = 0
@@ -340,7 +342,7 @@ class DownloadManager:
                 await persist()
         finally:
             os.close(fd)
-        part.replace(target)
+        replace_file(part, target)
         progress_file.unlink(missing_ok=True)
 
     def credit(self, job, entry, amount, add=False):
@@ -383,4 +385,4 @@ class DownloadManager:
                               for f in job['files']])
         temporary = folder / f"inflect-{job['id']}.json.tmp"
         temporary.write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
-        temporary.replace(folder / f"inflect-{job['id']}.json")
+        replace_file(temporary, folder / f"inflect-{job['id']}.json")

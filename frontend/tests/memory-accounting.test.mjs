@@ -35,3 +35,8 @@ test('headroom cannot be negative or exceed capacity remaining after the model',
   assert.equal(memoryBreakdown({...ram,available_bytes:GiB},model,true).availableBytes,0);
   assert.equal(memoryBreakdown({...ram,available_bytes:400*GiB},model,true).availableBytes,ram.total_bytes-model.resident_bytes);
 });
+test('Windows working sets are not reserved again from available memory',()=>{
+  const windows={...model,accounting:'process_tree_working_set'};
+  assert.equal(memoryBreakdown(ram,windows,true).availableBytes,Math.min(ram.total_bytes-windows.resident_bytes,ram.available_bytes));
+  assert.equal(memoryBreakdown({...ram,available_bytes:40*GiB},windows,true).availableBytes,40*GiB);
+});

@@ -1,3 +1,4 @@
+import os
 import stat
 from unittest.mock import AsyncMock
 
@@ -28,7 +29,8 @@ def test_default_token_file_is_outside_the_project():
 def test_saved_token_is_private_and_used(token_home):
     assert hub.hub_token() is None and hub.token_source() is None
     hub.save_token(TOKEN)
-    assert stat.S_IMODE(hub.TOKEN_FILE.stat().st_mode) == 0o600
+    if os.name != 'nt':  # Windows protects %APPDATA% with per-user ACLs, not mode bits.
+        assert stat.S_IMODE(hub.TOKEN_FILE.stat().st_mode) == 0o600
     assert hub.hub_token() == TOKEN and hub.token_source() == 'inflect'
     assert hub.hub_headers()['Authorization'] == f'Bearer {TOKEN}'
     hub.remove_token()

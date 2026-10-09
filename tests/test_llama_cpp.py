@@ -182,3 +182,39 @@ def test_full_context_is_rejected_before_generation():
     with pytest.raises(ValueError, match='history is not truncated'):
         run_counted(supervisor, 8180, seen)
     assert [path for path, _ in seen] == ['/apply-template', '/tokenize']
+
+
+def synthetic_pe(names, merged_strings=b''):
+    """A minimal PE32+ image: one section holding (tail-merged) strings and an
+    MSVC-style {enum, const char *} initializer array, as in llama.dll."""
+    base, rva, raw = 0x180000000, 0x1000, 0x400
+    strings, addresses = bytearray(merged_strings), {}
+    for name in reversed(names):  # The linker does not keep source order.
+        addresses[name] = base + rva + len(strings)
+        strings += name.encode() + b'\0'
+    pointers = [addresses[name] for name in names]
+    table_offset = (len(strings) + 15) // 16 * 16
+    body = bytes(strings).ljust(table_offset, b'\0')
+    order = list(range(len(names)))
+    order[2:4] = order[3:1:-1]  # Source order, not enum order.
+    body += b''.join(struct.pack('<IIQ', order[i], 0, pointer) for i, pointer in enumerate(pointers)) + bytes(16)
+    header = 0x80
+    image = bytearray(raw)
+    struct.pack_into('<I', image, 0x3C, header)
+    image[header:header + 4] = b'PE\0\0'
+    struct.pack_into('<HH', image, header + 4, 0x8664, 1)
+    struct.pack_into('<H', image, header + 20, 240)
+    struct.pack_into('<H', image, header + 24, 0x20B)
+    struct.pack_into('<Q', image, header + 48, base)
+    struct.pack_into('<IIII', image, header + 24 + 240 + 8, len(body), rva, len(body), raw)
+    return bytes(image) + body
+
+
+def test_windows_llama_dll_architecture_table_survives_merged_strings():
+    from loader.discover import pe_architectures
+    names = ['clip', 'llama', 'qwen35moe', 'qwen35', 'deepseek2', *[f'arch{i}' for i in range(25)]]
+    image = synthetic_pe(names, merged_strings=b'\0bailingmoe\0post_moe\0')
+    assert b'\0clip\0llama\0' not in image  # The Linux contiguous-table scan cannot apply.
+    assert pe_architectures(image) == set(names)
+    assert pe_architectures(b'MZ' + bytes(200)) is None
+    assert pe_architectures(synthetic_pe(['clip', 'mistral', 'llama'])) is None

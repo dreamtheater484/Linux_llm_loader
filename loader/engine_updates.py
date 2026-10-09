@@ -1,34 +1,35 @@
 """Explicit, bounded engine updates to the versions shipped with Inflect."""
 import asyncio
 from collections import deque
+from contextlib import suppress
 import json
 import os
 from pathlib import Path
-import signal
 import sys
 
 from fastapi import HTTPException
 
+from inflect_platform import ProcessTree, exllama_lock, owned, program, venv_python
 from . import engines
 from .app_settings import read_config, revision, values, save_preferences, SavePreferences
 
 
 def engine_details():
-    llama = json.loads((engines.PROJECT / 'runtime-locks/llama-cpp.json').read_text())
-    exl = json.loads((engines.PROJECT / 'runtime-locks/exllama.json').read_text())
+    llama = json.loads((engines.PROJECT / 'runtime-locks/llama-cpp.json').read_text(encoding='utf-8'))
+    exl = exllama_lock(engines.PROJECT)
     result = []
     for engine in engines.engine_inventory():
         if engine['id'] not in ('gguf', 'exl3'):
             continue
         engine = dict(engine)
         if engine['id'] == 'gguf':
-            managed = engines.GGUF == engines.RUNTIME / 'llama/bin/llama-server'
+            managed = engines.GGUF == program(engines.RUNTIME / 'llama/bin/llama-server')
             supported = llama['release']
             current = engine['installed'] and (engine.get('receipt') or {}).get('release') == supported
             engine.update(path=str(engines.GGUF))
         else:
             supported = f"{exl['version']} / TabbyAPI {exl['tabby_revision'][:8]}"
-            managed = engines.EXL_PYTHON == engines.RUNTIME / 'exl3/bin/python' or engines.EXL_PYTHON.is_relative_to(engines.RUNTIME / 'exl3-releases')
+            managed = engines.EXL_PYTHON == venv_python(engines.RUNTIME / 'exl3') or engines.EXL_PYTHON.is_relative_to(engines.RUNTIME / 'exl3-releases')
             current = (engine['installed'] and engine.get('package_version') == exl['package_version']
                        and engine.get('torch_version') == exl['torch']
                        and engine.get('tabby_revision') == exl['tabby_revision'][:8])
@@ -75,13 +76,15 @@ class EngineUpdater:
                      '--runtime-dir', str(engines.RUNTIME)]
         if engine_id == 'exl3':
             arguments += ['--receipt', str(receipt)]
+        tree = None
         try:
             before = read_config()
             state_dir.mkdir(parents=True, exist_ok=True)
             receipt.unlink(missing_ok=True)
             self.proc = await asyncio.create_subprocess_exec(*arguments, cwd=engines.PROJECT,
-                env={**os.environ, 'PYTHONUNBUFFERED': '1'}, start_new_session=True,
+                env={**os.environ, 'PYTHONUNBUFFERED': '1'}, **owned(), stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=2**20)
+            tree = ProcessTree(self.proc.pid)
             async with asyncio.timeout(3600):
                 while line := await self.proc.stdout.readline():
                     self.lines.append(line.decode(errors='replace').rstrip()[-2000:])
@@ -89,7 +92,7 @@ class EngineUpdater:
             if code:
                 raise RuntimeError(f'Installer exited with code {code}. The previous engine remains selected.')
             if engine_id == 'exl3':
-                prepared = json.loads(receipt.read_text())
+                prepared = json.loads(receipt.read_text(encoding='utf-8'))
                 preferences = {**values(before, active), **{key: prepared[key] for key in ('exl_python', 'tabby_dir')}}
                 save_preferences(SavePreferences(revision=revision(before), values=preferences), active)
                 self.lines.append('Installed successfully. Restart Inflect to use the prepared ExLlama runtime.')
@@ -98,11 +101,13 @@ class EngineUpdater:
             self.state = 'complete'
         except BaseException as exc:
             if self.proc and self.proc.returncode is None:
+                tree = tree or ProcessTree(self.proc.pid)
                 try:
-                    os.killpg(self.proc.pid, signal.SIGTERM)
+                    tree.terminate()
                     await asyncio.wait_for(self.proc.wait(), 10)
                 except TimeoutError:
-                    os.killpg(self.proc.pid, signal.SIGKILL)
+                    with suppress(ProcessLookupError):
+                        tree.kill()
                     await self.proc.wait()
                 except ProcessLookupError:
                     pass
@@ -111,6 +116,8 @@ class EngineUpdater:
             if isinstance(exc, asyncio.CancelledError):
                 raise
         finally:
+            if tree:
+                tree.close()
             receipt.unlink(missing_ok=True)
 
     async def close(self):

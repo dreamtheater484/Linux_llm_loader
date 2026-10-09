@@ -7,7 +7,8 @@ from loader import metrics
 GiB = 2**30
 
 
-def test_mapped_model_cache_is_counted_as_physical_ram():
+def test_mapped_model_cache_is_counted_as_physical_ram(monkeypatch):
+    monkeypatch.setattr(metrics, 'WINDOWS', False)
     vm = SimpleNamespace(total=183*GiB, free=47*GiB, available=170*GiB,
                          cached=125*GiB, buffers=GiB, shared=2*GiB)
     ram = metrics.system_memory(vm)
@@ -24,6 +25,7 @@ def test_mapped_model_cache_is_counted_as_physical_ram():
 
 
 def test_engine_workers_count_shared_pages_proportionally(tmp_path, monkeypatch):
+    monkeypatch.setattr(metrics, 'WINDOWS', False)
     root, worker = Mock(pid=10), Mock(pid=11)
     root.children.return_value = [worker]
     root.is_running.return_value = True
@@ -44,6 +46,48 @@ def test_engine_workers_count_shared_pages_proportionally(tmp_path, monkeypatch)
     assert metrics.process_memory(10, tmp_path) is None
     (tmp_path/'10/smaps_rollup').unlink()
     assert metrics.process_memory(10, tmp_path) is None
+
+
+def test_windows_page_lists_keep_physical_occupancy_accounting():
+    vm = SimpleNamespace(total=190*GiB, available=148*GiB)
+    ram = metrics.windows_system_memory(vm, dict(free=110*GiB, standby=38*GiB, modified=GiB))
+    assert ram['accounting'] == metrics.RAM_ACCOUNTING
+    assert ram['used_bytes'] == 80*GiB and ram['free_bytes'] == 110*GiB
+    assert ram['cache_bytes'] == 39*GiB and ram['non_cache_bytes'] == 41*GiB
+    assert ram['available_bytes'] == 148*GiB
+
+
+def test_windows_counter_failure_is_labelled_not_guessed(monkeypatch):
+    import sys
+    fake = SimpleNamespace(memory_lists=lambda: None)
+    monkeypatch.setitem(sys.modules, 'loader.windows_metrics', fake)
+    ram = metrics.windows_system_memory(SimpleNamespace(total=100*GiB, available=60*GiB))
+    assert ram['accounting'] == 'legacy_total_minus_available'
+    assert ram['used_bytes'] == 40*GiB and ram['cache_bytes'] is None
+
+
+def test_windows_engine_memory_splits_private_and_shareable_working_set(monkeypatch):
+    root, worker = Mock(pid=10), Mock(pid=11)
+    root.children.return_value = [worker]
+    root.is_running.return_value = True
+    monkeypatch.setattr(metrics.psutil, 'Process', lambda pid: root)
+    readings = {10: dict(working_set=900*GiB // 100, private_working_set=GiB, private_commit=2*GiB),
+                11: dict(working_set=GiB, private_working_set=GiB // 2, private_commit=GiB)}
+    result = metrics.windows_process_memory(10, readings.get)
+    assert result['resident_bytes'] == 9*GiB + GiB
+    assert result['anonymous_bytes'] == GiB + GiB // 2
+    assert result['file_bytes'] == 8*GiB + GiB // 2
+    assert result['swap_bytes'] is None and result['shared_bytes'] is None  # Unknown, never zero.
+    assert result['accounting'] == 'process_tree_working_set'
+    del readings[11]
+    assert metrics.windows_process_memory(10, readings.get)['resident_bytes'] == 9*GiB
+    assert metrics.windows_process_memory(10, {}.get) is None
+
+
+def test_windows_cpu_power_reports_unavailable_rather_than_zero():
+    assert metrics.CpuPower.windows_sample(lambda: 61.5)['watts'] == 61.5
+    assert metrics.CpuPower.windows_sample(lambda: None)['watts'] is None
+    assert metrics.CpuPower.windows_sample(lambda: 5000.0)['watts'] is None
 
 
 def test_model_switch_or_unload_never_reuses_previous_memory(monkeypatch):

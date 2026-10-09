@@ -1,2 +1,11 @@
 # Preserve generated bundles verbatim, including whitespace inside string literals.
 frontend/dist/** linguist-generated=true -whitespace
+
+# git apply, bash and Docker builds need LF even in a Windows checkout (core.autocrlf).
+*.patch text eol=lf
+*.sh text eol=lf
+benchmarks/** text eol=lf
+# cmd.exe parses batch files reliably only with CRLF.
+*.cmd text eol=crlf
+# Binary assets.
+*.ico binary

@@ -7,17 +7,21 @@ from pathlib import Path
 import sys
 import urllib.request
 
-ASSET = 'exllamav3-1.5.0+cu128.torch2.9.0-cp312-cp312-linux_x86_64.whl'
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from inflect_platform import O_BINARY, exllama_lock, make_sparse, pwrite
+
+LOCK = exllama_lock(ROOT)
+ASSET = LOCK['wheel']
 target = ROOT / '.runtime/wheels' / ASSET
-expected = 'd8f5b483ca882c52d79a73c059b508c666663a68b4c60e420ca489e654e8104a'
+expected = LOCK['wheel_sha256']
 if target.is_file():
     with target.open('rb') as file:
         if hashlib.file_digest(file, 'sha256').hexdigest() == expected:
             print('Pinned wheel already verified:', target)
             sys.exit(0)
 headers = {'User-Agent': 'Inflect-Setup/0.1'}
-release = json.load(urllib.request.urlopen(urllib.request.Request('https://api.github.com/repos/turboderp-org/exllamav3/releases/tags/v1.5.0', headers=headers)))
+release = json.load(urllib.request.urlopen(urllib.request.Request(f"https://api.github.com/repos/turboderp-org/exllamav3/releases/tags/v{LOCK['version']}", headers=headers)))
 asset = next(a for a in release['assets'] if a['name'] == ASSET)
 size = asset['size']
 digest = asset.get('digest', '')
@@ -27,7 +31,8 @@ if digest != 'sha256:' + expected:
     raise RuntimeError('Release digest differs from the pinned, tested wheel.')
 target.parent.mkdir(parents=True, exist_ok=True)
 partial = target.with_suffix('.partial')
-fd = os.open(partial, os.O_RDWR | os.O_CREAT, 0o600)
+fd = os.open(partial, os.O_RDWR | os.O_CREAT | O_BINARY, 0o600)
+make_sparse(fd)
 os.ftruncate(fd, size)
 
 
@@ -41,7 +46,7 @@ def transfer(start):
         while block := response.read(1024 * 1024):
             if offset + len(block) > end + 1:
                 raise RuntimeError('Oversized range response')
-            written = os.pwrite(fd, block, offset)
+            written = pwrite(fd, block, offset)
             if written != len(block):
                 raise RuntimeError('Incomplete local write')
             offset += written

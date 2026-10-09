@@ -6,8 +6,24 @@ import stat
 import subprocess
 import sys
 
+import pytest
+
 
 PROJECT = Path(__file__).resolve().parents[1]
+WINDOWS = os.name == 'nt'
+
+
+def homes(config_home, data_home=None):
+    """Point both the XDG (Linux) and the AppData (Windows) locations at a test folder."""
+    values = {'XDG_CONFIG_HOME': str(config_home), 'APPDATA': str(config_home)}
+    if data_home is not None:
+        values.update(XDG_DATA_HOME=str(data_home), LOCALAPPDATA=str(data_home))
+    return values
+
+
+def private(path):
+    # Windows protects AppData with per-user ACLs instead of POSIX mode bits.
+    return WINDOWS or stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_private_config_drives_launcher_paths(tmp_path):
@@ -25,8 +41,7 @@ def test_private_config_drives_launcher_paths(tmp_path):
     }))
     environment = {
         **os.environ,
-        'XDG_DATA_HOME': str(data_home),
-        'XDG_CONFIG_HOME': str(config_home),
+        **homes(config_home, data_home),
         'INFLECT_PROJECT': str(PROJECT),
         'INFLECT_RUNTIME': str(data_home / 'custom-runtime'),
     }
@@ -41,7 +56,7 @@ def test_private_config_drives_launcher_paths(tmp_path):
     assert config['runtime'] == str(data_home / 'custom-runtime')
     assert config['lan_network'] == '10.42.7.0/24'
     assert config['public_url'] == 'http://10.42.7.23:7860'
-    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+    assert private(config_file)
 
     child_env = {k: v for k, v in environment.items() if k not in ('INFLECT_PROJECT', 'INFLECT_RUNTIME')}
     result = subprocess.run([
@@ -58,6 +73,7 @@ def test_public_launcher_contains_no_machine_location():
     assert '/dev/disk/by-uuid/' not in source
 
 
+@pytest.mark.skipif(WINDOWS, reason='Ubuntu installer; Windows uses setup-windows.ps1')
 def test_setup_help_does_not_require_installation():
     result = subprocess.run(
         ['bash', str(PROJECT / 'scripts/setup-ubuntu.sh'), '--help'],
@@ -67,6 +83,16 @@ def test_setup_help_does_not_require_installation():
     assert '--preflight-only' in result.stdout
 
 
+@pytest.mark.skipif(not WINDOWS, reason='Windows PowerShell installer')
+def test_windows_setup_help_does_not_require_installation():
+    result = subprocess.run(
+        ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(PROJECT / 'scripts/setup-windows.ps1'), '-Help'],
+        check=True, capture_output=True, text=True,
+    )
+    assert '-ModelDir PATH' in result.stdout
+    assert '-PreflightOnly' in result.stdout
+
+
 def test_access_configurator_can_return_to_loopback(tmp_path):
     config_home = tmp_path / 'config'
     config_file = config_home / 'inflect/config.json'
@@ -74,12 +100,12 @@ def test_access_configurator_can_return_to_loopback(tmp_path):
     config_file.write_text(json.dumps({'port': 7860, 'lan_network': '10.42.7.0/24'}))
     subprocess.run([
         sys.executable, str(PROJECT / 'scripts/configure-access.py'), '--local',
-    ], check=True, env={**os.environ, 'XDG_CONFIG_HOME': str(config_home)}, capture_output=True, text=True)
+    ], check=True, env={**os.environ, **homes(config_home)}, capture_output=True, text=True)
     config = json.loads(config_file.read_text())
     assert config['listen_host'] == '127.0.0.1'
     assert config['allowed_hosts'] == ['127.0.0.1', 'localhost']
     assert 'lan_network' not in config
-    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+    assert private(config_file)
 
 
 def test_rename_discovers_existing_config_and_preserves_paths(tmp_path):
@@ -89,7 +115,7 @@ def test_rename_discovers_existing_config_and_preserves_paths(tmp_path):
     config = dict(project=str(PROJECT), runtime=str(tmp_path/'runtime'), model_root=str(tmp_path/'models'), comfyui_container='existing-comfy', port=7860)
     old.write_text(json.dumps(config))
     result = subprocess.run([sys.executable, '-c', 'import launch; print(launch.CONFIG_FILE); print(launch.MODEL_ROOT)'],
-        cwd=PROJECT, env={**os.environ,'XDG_CONFIG_HOME':str(config_home)}, check=True, capture_output=True,text=True)
+        cwd=PROJECT, env={**os.environ, **homes(config_home)}, check=True, capture_output=True,text=True)
     new = config_home / 'inflect/config.json'
     assert json.loads(new.read_text()) == config
     assert not old.exists()

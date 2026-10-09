@@ -6,14 +6,17 @@ import os
 from pathlib import Path
 import subprocess
 
+from inflect_platform import hidden
+
 
 @lru_cache(maxsize=8)
 def _runtime_info(path, mtime_ns, size):
     try:
-        help_result = subprocess.run([path, '--help'], capture_output=True, text=True, timeout=20, check=True)
-        version = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=10, check=True)
+        quiet = dict(capture_output=True, text=True, encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL, **hidden())
+        help_result = subprocess.run([path, '--help'], timeout=20, check=True, **quiet)
+        version = subprocess.run([path, '--version'], timeout=10, check=True, **quiet)
         manifest = Path(path).resolve().parent.parent / 'manifest.json'
-        receipt = json.loads(manifest.read_text()) if manifest.is_file() else None
+        receipt = json.loads(manifest.read_text(encoding='utf-8')) if manifest.is_file() else None
         return dict(installed=True, version=(version.stdout or version.stderr).strip().splitlines()[0],
                     mtp='draft-mtp' in help_result.stdout and '--spec-draft-n-max' in help_result.stdout,
                     receipt=receipt)

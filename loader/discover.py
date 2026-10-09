@@ -10,10 +10,12 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import statistics
+import struct
 import time
 
 import httpx
 
+from inflect_platform import WINDOWS, config_home, replace_file, site_packages, venv_root
 from . import engines
 from .naming import active_billions, display, family_key, merge_families, quant_label, split_name
 
@@ -25,7 +27,7 @@ PROJECTOR_PREFERENCE = ('f16', 'bf16', 'q8', 'f32')
 # Inflect keeps its own copy of a Hugging Face token outside the project folder, so
 # it can never be committed with the code. The standard huggingface-cli login and
 # the HF_TOKEN environment variable are honoured too.
-TOKEN_FILE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'inflect' / 'huggingface-token'
+TOKEN_FILE = config_home() / 'inflect' / 'huggingface-token'
 
 
 def _cli_token_file():
@@ -68,7 +70,7 @@ def save_token(token):
     with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
         handle.write(token.strip() + '\n')
     os.chmod(temporary, 0o600)
-    os.replace(temporary, TOKEN_FILE)
+    replace_file(temporary, TOKEN_FILE)
 
 
 def remove_token():
@@ -113,9 +115,10 @@ def _cached(key, stamp, build):
 
 
 def llama_architectures(server=None):
-    """Read the architecture name table compiled into libllama."""
+    """Read the architecture name table compiled into libllama (llama.dll on Windows)."""
     server = Path(server or engines.GGUF)
-    libraries = sorted(server.parent.glob('libllama.so*')) or sorted(server.parent.parent.glob('lib*/libllama.so*'))
+    libraries = ((sorted(server.parent.glob('llama.dll')) if WINDOWS else [])
+                 or sorted(server.parent.glob('libllama.so*')) or sorted(server.parent.parent.glob('lib*/libllama.so*')))
     if not libraries:
         return None
     library = libraries[0]
@@ -128,21 +131,78 @@ def llama_architectures(server=None):
         data = library.read_bytes()
         start = data.find(b'\x00clip\x00llama\x00')
         if start < 0:
+            names = pe_architectures(data)
+        else:
+            names = set()
+            for token in data[start + 1:start + 32768].split(b'\x00'):
+                text = token.decode('ascii', 'ignore')
+                if not re.fullmatch(ARCHITECTURE, text):
+                    break
+                names.add(text)
+        if not names:
             return None
-        names = set()
-        for token in data[start + 1:start + 32768].split(b'\x00'):
-            text = token.decode('ascii', 'ignore')
-            if not re.fullmatch(r'[a-z][a-z0-9_.\-]{1,40}', text):
-                break
-            names.add(text)
         names.discard('clip')
         return names if len(names) > 20 else None
     return _cached('gguf', stamp, build)
 
 
+ARCHITECTURE = r'[a-z][a-z0-9_.\-]{1,40}'
+
+
+def pe_architectures(data):
+    """MSVC merges string literals, so llama.dll has no contiguous name table. Its
+    LLM_ARCH_NAMES initializer is a constant array of {enum, const char *} pairs
+    in source order, starting {LLM_ARCH_CLIP, "clip"}, {LLM_ARCH_LLAMA, "llama"}."""
+    try:
+        header = struct.unpack_from('<I', data, 0x3C)[0]
+        if data[header:header + 4] != b'PE\0\0' or struct.unpack_from('<H', data, header + 24)[0] != 0x20B:
+            return None  # Only 64-bit (PE32+) images.
+        count, optional = struct.unpack_from('<H', data, header + 6)[0], struct.unpack_from('<H', data, header + 20)[0]
+        base = struct.unpack_from('<Q', data, header + 48)[0]
+        sections = [struct.unpack_from('<IIII', data, header + 24 + optional + 40 * i + 8) for i in range(count)]
+    except struct.error:
+        return None
+
+    def offset_of(address):
+        rva = address - base
+        return next((raw + rva - start for size, start, raw_size, raw in sections
+                     if start <= rva < start + max(size, raw_size)), None)
+
+    def name_at(address):
+        offset = offset_of(address)
+        if offset is None:
+            return None
+        end = data.find(b'\0', offset, offset + 48)
+        text = data[offset:end].decode('ascii', 'ignore') if end > offset else ''
+        return text if re.fullmatch(ARCHITECTURE, text) else None
+
+    def address_of(offset):
+        return next((base + start + offset - raw for size, start, raw_size, raw in sections
+                     if raw <= offset < raw + raw_size), None)
+
+    for match in re.finditer(rb'clip\x00', data):
+        address = address_of(match.start())
+        if address is None:
+            continue
+        table = data.find(struct.pack('<IIQ', 0, 0, address))
+        while table >= 0:
+            names = []
+            for entry in range(table, len(data) - 15, 16):
+                value, _, pointer = struct.unpack_from('<IIQ', data, entry)
+                name = name_at(pointer) if value < 4096 else None
+                if not name:
+                    break
+                names.append(name)
+            if names[:2] == ['clip', 'llama']:
+                return set(names)
+            table = data.find(struct.pack('<IIQ', 0, 0, address), table + 1)
+    return None
+
+
 def exl3_architectures(python=None):
     python = Path(python or engines.EXL_PYTHON)
-    folders = sorted(python.parent.parent.glob('lib/python*/site-packages/exllamav3/architecture'))
+    folders = [site / 'exllamav3/architecture' for site in site_packages(venv_root(python))
+               if (site / 'exllamav3/architecture').is_dir()]
     if not folders:
         return None
     folder = folders[0]

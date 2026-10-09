@@ -20,29 +20,72 @@ def within(root, name):
     return path
 
 
+class _HeaderReader:
+    """Sequential reads from a buffered window of the file.
+
+    Headers hold millions of tokenizer strings; a seek/tell system call per field
+    made a library scan take tens of seconds (several times slower on Windows)."""
+    CHUNK = 8 * 2**20
+
+    def __init__(self, f, size):
+        self.f, self.size = f, size
+        self.data, self.start, self.pos = b'', 0, 0
+
+    def window(self, n):
+        """The buffer and the current position's offset in it, holding n more bytes."""
+        offset = self.pos - self.start
+        if offset < 0 or offset + n > len(self.data):
+            self.f.seek(self.pos)
+            self.data, self.start, offset = self.f.read(max(n, self.CHUNK)), self.pos, 0
+            if len(self.data) < n:
+                raise ValueError('Truncated GGUF header')
+        return self.data, offset
+
+    def unpack(self, fmt):
+        size = struct.calcsize(fmt)
+        data, offset = self.window(size)
+        self.pos += size
+        return struct.unpack_from(fmt, data, offset)[0]
+
+    def string(self, keep=True):
+        size = self.unpack('<Q')
+        if size > self.size - self.pos:
+            raise ValueError('Invalid GGUF string length')
+        if not keep:
+            self.pos += size
+            return None
+        if size > 1_000_000:
+            raise ValueError('Oversized metadata string')
+        data, offset = self.window(size)
+        self.pos += size
+        return data[offset:offset + size].decode('utf-8', errors='replace')
+
+    def skip_strings(self, count):
+        """Skip an array of strings (token vocabularies) with the same bounds checks."""
+        data, start, pos, size, unpack = self.data, self.start, self.pos, self.size, struct.unpack_from
+        for _ in range(count):
+            offset = pos - start
+            if offset < 0 or offset + 8 > len(data):
+                self.pos = pos
+                data, offset = self.window(8)
+                start = self.start
+            length = unpack('<Q', data, offset)[0]
+            pos += 8
+            if length > size - pos:
+                raise ValueError('Invalid GGUF string length')
+            pos += length
+        self.pos = pos
+
+
 def gguf_metadata(path, tensors=False):
     """Read selected GGUF fields, skipping token arrays and tensor payloads.
 
     With tensors=True, also sum the bytes of routed-expert tensors from the
     tensor directory, so memory placement can be estimated before loading."""
     file_size = path.stat().st_size
-    with path.open('rb') as f:
-        def unpack(fmt):
-            size = struct.calcsize(fmt)
-            data = f.read(size)
-            if len(data) != size:
-                raise ValueError('Truncated GGUF header')
-            return struct.unpack(fmt, data)[0]
-
-        def string(keep=True):
-            size = unpack('<Q')
-            if size > file_size - f.tell():
-                raise ValueError('Invalid GGUF string length')
-            if keep:
-                if size > 1_000_000:
-                    raise ValueError('Oversized metadata string')
-                return f.read(size).decode('utf-8', errors='replace')
-            f.seek(size, 1)
+    with path.open('rb', buffering=0) as f:
+        reader = _HeaderReader(f, file_size)
+        unpack, string = reader.unpack, reader.string
 
         def value(kind, keep, depth=0):
             formats = {0:'<B', 1:'<b', 2:'<H', 3:'<h', 4:'<I', 5:'<i', 6:'<f', 7:'<?', 10:'<Q', 11:'<q', 12:'<d'}
@@ -55,14 +98,19 @@ def gguf_metadata(path, tensors=False):
                 if length > 10_000_000:
                     raise ValueError('Oversized GGUF array')
                 if subtype in formats:
-                    f.seek(length * struct.calcsize(formats[subtype]), 1)
+                    reader.pos += length * struct.calcsize(formats[subtype])
+                elif subtype == 8:
+                    reader.skip_strings(length)
                 else:
                     for _ in range(length):
                         value(subtype, False, depth + 1)
                 return None
             raise ValueError('Unsupported GGUF metadata type')
 
-        if f.read(4) != b'GGUF' or unpack('<I') not in (2, 3):
+        if f.read(4) != b'GGUF':
+            raise ValueError('Invalid GGUF header')
+        reader.pos = 4
+        if unpack('<I') not in (2, 3):
             raise ValueError('Invalid GGUF header')
         tensor_count = unpack('<Q')
         count = unpack('<Q')
@@ -82,10 +130,10 @@ def gguf_metadata(path, tensors=False):
                 dims = unpack('<I')
                 if dims > 8:
                     raise ValueError('Invalid GGUF tensor shape')
-                f.seek(8 * dims + 4, 1)
+                reader.pos += 8 * dims + 4
                 entries.append((unpack('<Q'), name))
             alignment = int(result.get('general.alignment') or 32)
-            start = -(-f.tell() // alignment) * alignment
+            start = -(-reader.pos // alignment) * alignment
             entries.sort()
             ends = [offset for offset, _ in entries[1:]] + [file_size - start]
             result['_tensor_bytes'] = max(0, file_size - start)
@@ -332,7 +380,8 @@ def scan(root, extra=()):
     for model in models:
         path = Path(model['path'])
         inside = path.is_relative_to(root)
-        model['id'] = hashlib.sha256(str(path.relative_to(root) if inside else path).encode()).hexdigest()[:16]
+        # Forward slashes keep library IDs (and saved profiles) identical on Linux and Windows.
+        model['id'] = hashlib.sha256((path.relative_to(root).as_posix() if inside else str(path)).encode()).hexdigest()[:16]
         model['title'] = re.sub(r'[-_]?(EXL3.*|NVFP4.*|UD-.*)$', '', model['name']).replace('-', ' ')
         model['location'] = 'library' if inside else 'added'
         family, variant = split_name(model['name'] if model['format'] == 'GGUF' or path.name == model['name'] else path.name)

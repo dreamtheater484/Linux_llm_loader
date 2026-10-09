@@ -3,12 +3,12 @@
 import argparse
 import ipaddress
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from inflect_access import access_config, lan_interfaces
+from inflect_platform import config_home
 
 
 parser = argparse.ArgumentParser(description='Configure which computers can open Inflect.')
@@ -17,8 +17,7 @@ mode.add_argument('--lan', action='store_true', help='Allow the directly connect
 mode.add_argument('--local', action='store_true', help='Allow this computer only')
 args = parser.parse_args()
 
-config_home = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
-config_file = config_home / 'inflect/config.json'
+config_file = config_home() / 'inflect/config.json'
 try:
     config = json.loads(config_file.read_text(encoding='utf-8'))
 except FileNotFoundError:

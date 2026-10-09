@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,7 +65,8 @@ def test_permanent_delete_scrubs_database_and_cascades_attachments(tmp_path):
     assert list(tmp_path.glob('*-journal')) == []
     with store.connect() as db:
         assert db.execute('SELECT COUNT(*) FROM attachments').fetchone()[0] == 0
-    assert store.path.stat().st_mode & 0o777 == 0o600
+    if os.name != 'nt':  # Windows protects the profile folder with per-user ACLs, not mode bits.
+        assert store.path.stat().st_mode & 0o777 == 0o600
 
 
 def test_attachments_cannot_cross_conversation_boundaries(tmp_path):

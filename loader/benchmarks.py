@@ -9,24 +9,21 @@ from collections import Counter
 from contextlib import suppress
 import copy
 from datetime import datetime, timezone
-import fcntl
 import hashlib
-import grp
 import json
 import os
 import platform
 from pathlib import Path
 import re
-import pwd
 import shlex
 import secrets
 import shutil
-import signal
 import sqlite3
 import time
 import zipfile
 
 from fastapi import HTTPException
+from inflect_platform import WINDOWS, ProcessTree, lock, owned, site_packages
 from .engines import RUNTIME, TABBY, GGUF
 from .reasoning import reasoning_kwargs
 from .archive import ABORTED, discard_aborted, discard_run, list_runs, run_performance, with_performance
@@ -93,7 +90,7 @@ def digest(value):
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False))
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding='utf-8')
     temporary.replace(path)
 
 
@@ -110,7 +107,8 @@ def clean(value):
 def runtime_identity(engine):
     """Record installed artifacts without importing an inference runtime."""
     packages = {}
-    for metadata in sorted((RUNTIME / ('exl3' if engine == 'exl3' else 'vllm') / 'lib').glob('python*/site-packages/*.dist-info/METADATA')):
+    environment = RUNTIME / ('exl3' if engine == 'exl3' else 'vllm')
+    for metadata in sorted(m for site in site_packages(environment) for m in site.glob('*.dist-info/METADATA')):
         name = version = None
         for line in metadata.read_text(errors='replace').splitlines():
             if line.startswith('Name: '):
@@ -127,14 +125,14 @@ def runtime_identity(engine):
                   inflect_sources=source, inflect_source_hash=digest(source))
     if engine == 'exl3':
         # Include the working code, including local patches, rather than a displayed version label.
-        result['tabby_sources_hash'] = digest({str(p.relative_to(TABBY)): hashlib.sha256(p.read_bytes()).hexdigest()
+        result['tabby_sources_hash'] = digest({p.relative_to(TABBY).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(TABBY.rglob('*.py')) if '.git' not in p.parts and 'venv' not in p.parts})
     elif engine == 'gguf' and GGUF.is_file():
         stat = GGUF.stat()
         result['llama_server'] = dict(path=str(GGUF), size=stat.st_size, mtime_ns=stat.st_mtime_ns)
         manifest = GGUF.resolve().parent.parent / 'manifest.json'
         if manifest.is_file():
-            result['llama_server']['release'] = json.loads(manifest.read_text())
+            result['llama_server']['release'] = json.loads(manifest.read_text(encoding='utf-8'))
     return result
 
 
@@ -283,7 +281,7 @@ class EvaluationManager:
         path = self.root / self.current['id'] / f'task-{index + 1:02d}' / name
         path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(value, str):
-            path.write_text(value, encoding='utf-8')
+            path.write_text(value, encoding='utf-8', newline='\n')
         else:
             atomic_json(path, value)
 
@@ -309,14 +307,18 @@ class EvaluationManager:
 
         sg activates an already-granted Docker group in an older login session.
         Every argument is shell-quoted; model commands still only run in Docker.
+        Docker Desktop on Windows needs no group activation.
         """
-        if args[0] == 'docker':
+        if args[0] == 'docker' and not WINDOWS:
+            import grp
+            import pwd
             with suppress(KeyError):
                 group = grp.getgrnam('docker')
                 if shutil.which('sg') and group.gr_gid not in os.getgroups() and pwd.getpwuid(os.getuid()).pw_name in group.gr_mem:
                     args = ('sg', 'docker', '-c', shlex.join([str(a) for a in args]))
         proc = await asyncio.create_subprocess_exec(*map(str, args), stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **owned())
+        tree = ProcessTree(proc.pid)
         output = bytearray()
         truncated = False
         import codecs
@@ -341,12 +343,14 @@ class EvaluationManager:
                 await reader
         except BaseException:
             with suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
+                tree.kill()
             await proc.wait()
             reader.cancel()
             with suppress(asyncio.CancelledError):
                 await reader
             raise
+        finally:
+            tree.close()
         text = ('[Earlier output truncated]\n' if truncated else '') + output.decode(errors='replace')
         if check and proc.returncode:
             raise RuntimeError(text[-4000:] or f'{args[0]} exited with code {proc.returncode}.')
@@ -408,7 +412,7 @@ class EvaluationManager:
         path = self.assets / (suite + '.json')
         if not path.is_file():
             raise ValueError('Prepare this benchmark before starting a run.')
-        result = json.loads(path.read_text())
+        result = json.loads(path.read_text(encoding='utf-8'))
         fingerprint = result.pop('fingerprint')
         if digest(result) != fingerprint:
             raise ValueError('Benchmark assets changed. Prepare them again before running.')
@@ -419,13 +423,15 @@ class EvaluationManager:
 
     async def availability(self):
         docker = bool(shutil.which('docker'))
-        message = 'Install Docker Engine and give your user access to its daemon, then recheck.'
+        message = ('Install Docker Desktop and start it, then recheck.' if WINDOWS else
+                   'Install Docker Engine and give your user access to its daemon, then recheck.')
         if docker:
             try:
                 await self.command('docker', 'info', '--format', '{{.ServerVersion}}', timeout=5)
                 message = ''
             except (OSError, RuntimeError, TimeoutError):
-                docker, message = False, 'Docker is installed but its daemon is unavailable to Inflect. Start Docker and check user permissions.'
+                docker, message = False, ('Docker Desktop is installed but not running. Start Docker Desktop, then recheck.' if WINDOWS else
+                                          'Docker is installed but its daemon is unavailable to Inflect. Start Docker and check user permissions.')
         suites = {}
         for suite, config in SUITES.items():
             try:
@@ -436,7 +442,11 @@ class EvaluationManager:
                 suites[suite] = dict(**config, prepared=True, revision=manifest['revision'], fingerprint=manifest['fingerprint'])
             except (OSError, ValueError, KeyError, RuntimeError, TimeoutError):
                 suites[suite] = dict(**config, prepared=False)
-        return dict(docker=docker, message=message, suites=suites, setup=self.setup, active=self.snapshot())
+        result = dict(docker=docker, message=message, suites=suites, setup=self.setup, active=self.snapshot())
+        if WINDOWS:
+            result['install_note'] = ('Run in PowerShell, then start Docker Desktop (it uses WSL 2 and may ask for a restart). '
+                                      'Inflect only uses its command-line tool; models stay on Windows.')
+        return result
 
     def snapshot(self):
         if not self.current:
@@ -466,17 +476,17 @@ class EvaluationManager:
         return self.setup
 
     async def _prepare(self, suite):
-        lock = None
+        guard = None
         try:
             self.assets.mkdir(parents=True, exist_ok=True)
-            lock = (self.assets / 'preparation.lock').open('a')
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            guard = (self.assets / 'preparation.lock').open('a')
+            lock(guard, blocking=False)
             setup_log = self.assets / f'{suite}-setup.log'
-            setup_log.write_text(f'{SUITES[suite]["benchmark"]} environment validation\n')
+            setup_log.write_text(f'{SUITES[suite]["benchmark"]} environment validation\n', encoding='utf-8', newline='\n')
             self.setup['log_url'] = f'/api/evaluations/preparation-log?suite={suite}'
             _, log = await self.command('docker', 'build', '-t', IMAGE, str(ROOT / 'benchmarks'), timeout=3600)
             self.assets.mkdir(parents=True, exist_ok=True)
-            (self.assets / 'build.log').write_text(log)
+            (self.assets / 'build.log').write_text(log, encoding='utf-8', newline='\n')
             _, identity = await self.command('docker', 'image', 'inspect', IMAGE, '--format', '{{.Id}}')
             worker_image = identity.strip()
             self.setup['message'] = 'Downloading the fixed task subset and pinning its dataset revision.'
@@ -510,12 +520,12 @@ class EvaluationManager:
             self.setup.update(state='error', message=str(exc))
         finally:
             await self.cleanup()
-            if lock:
-                lock.close()
+            if guard:
+                guard.close()
 
     @staticmethod
     def log_validation(path, task_id, phase, grade, output):
-        with path.open('a') as log:
+        with path.open('a', encoding='utf-8', newline='\n') as log:
             log.write(f'\n=== {task_id}: {phase} ===\n')
             log.write(json.dumps(grade, indent=2) + '\n\n' + output + '\n')
 
@@ -563,7 +573,7 @@ class EvaluationManager:
                 if file.suffix in ('.json', '.jinja', '.jinja2') and stat.st_size < 30_000_000:
                     identity['files'][-1]['sha256'] = hashlib.sha256(file.read_bytes()).hexdigest()
         profiles_path = self.state / 'profiles.json'
-        profiles = json.loads(profiles_path.read_text()) if profiles_path.exists() else []
+        profiles = json.loads(profiles_path.read_text(encoding='utf-8')) if profiles_path.exists() else []
         matched = [dict(id=p.get('id'), name=p['name']) for p in profiles if p.get('settings') == settings]
         now, run_id = time.time(), secrets.token_hex(8)
         config = SUITES[suite]

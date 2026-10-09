@@ -10,9 +10,10 @@ import time
 import urllib.request
 import webbrowser
 from inflect_access import access_config, private_lan
+from inflect_platform import (WINDOWS, append_log, config_home, default_runtime, notify_error, pid_alive,
+                              spawn_detached, venv_python)
 
-CONFIG_HOME = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
-DATA_HOME = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share'))
+CONFIG_HOME = config_home()
 CONFIG_FILE = Path(os.environ.get('INFLECT_CONFIG_FILE', CONFIG_HOME / 'inflect/config.json'))
 
 
@@ -52,7 +53,7 @@ CONFIG = read_config()
 ACCESS = access_config(CONFIG)
 SOURCE_PROJECT = Path(__file__).resolve().parent
 PROJECT = Path(os.environ.get('INFLECT_PROJECT', CONFIG.get('project', SOURCE_PROJECT))).expanduser()
-RUNTIME = Path(os.environ.get('INFLECT_RUNTIME', CONFIG.get('runtime', DATA_HOME / 'linux-llm-loader'))).expanduser()
+RUNTIME = Path(os.environ.get('INFLECT_RUNTIME', CONFIG.get('runtime', default_runtime()))).expanduser()
 MODEL_ROOT = Path(os.environ.get('INFLECT_MODEL_ROOT', CONFIG.get('model_root', Path.home() / 'models'))).expanduser()
 PORT = int(os.environ.get('INFLECT_PORT', CONFIG.get('port', 7860)))
 LISTEN_HOST = os.environ.get('INFLECT_LISTEN_HOST', ACCESS['listen_host'])
@@ -73,9 +74,7 @@ def main():
     if '--wait-for-pid' in sys.argv:
         old_pid = int(sys.argv[sys.argv.index('--wait-for-pid') + 1])
         for _ in range(180):
-            try:
-                os.kill(old_pid, 0)
-            except ProcessLookupError:
+            if not pid_alive(old_pid):
                 break
             time.sleep(1)
         else:
@@ -84,22 +83,25 @@ def main():
     if not listen_ip.is_loopback:
         if not private_lan(LISTEN_HOST, LAN_NETWORK):
             raise RuntimeError('LAN mode needs a private INFLECT_LAN_NETWORK containing the listen address.')
-    if not PROJECT.is_dir():
+    if not PROJECT.is_dir() and not WINDOWS:
         mount_device = os.environ.get('INFLECT_MOUNT_DEVICE', CONFIG.get('mount_device'))
         if mount_device:
             subprocess.run(['udisksctl', 'mount', '-b', mount_device], check=True)
     if not PROJECT.is_dir():
         raise RuntimeError(f'Inflect project is unavailable: {PROJECT}. Re-run setup after moving it.')
-    python = RUNTIME / 'manager/bin/python'
+    python = venv_python(RUNTIME / 'manager')
     if not python.is_file():
-        python = PROJECT / '.runtime/manager/bin/python'
+        python = venv_python(PROJECT / '.runtime/manager')
     if not python.is_file() or not (PROJECT / 'frontend/dist/index.html').is_file():
         raise RuntimeError('Inflect setup is incomplete. See the project README.')
     if not ready():
         state = RUNTIME / 'state'
         state.mkdir(parents=True, exist_ok=True)
-        with (state / 'manager.log').open('a') as log:
+        with append_log(state / 'manager.log') as log:
             environment = os.environ.copy()
+            if WINDOWS:
+                # Model names, profiles and chats are UTF-8; never fall back to the ANSI code page.
+                environment.update(PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
             environment.update(INFLECT_PROJECT=str(PROJECT), INFLECT_RUNTIME=str(RUNTIME),
                                INFLECT_MODEL_ROOT=str(MODEL_ROOT), INFLECT_PORT=str(PORT),
                                INFLECT_LISTEN_HOST=LISTEN_HOST, INFLECT_LAN_NETWORK=LAN_NETWORK,
@@ -109,8 +111,10 @@ def main():
                                   ('tabby_dir', 'INFLECT_TABBY')):
                 if CONFIG.get(key) and variable not in environment:
                     environment[variable] = CONFIG[key]
-            process = subprocess.Popen([str(python), '-m', 'uvicorn', 'loader.server:app', '--host', LISTEN_HOST, '--port', str(PORT), '--no-proxy-headers'],
-                cwd=PROJECT, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            # A stuck client connection must never keep the server, and its engine, from stopping.
+            process = spawn_detached([str(python), '-m', 'uvicorn', 'loader.server:app', '--host', LISTEN_HOST, '--port', str(PORT),
+                                      '--no-proxy-headers', '--timeout-graceful-shutdown', '15'],
+                cwd=PROJECT, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         for _ in range(120):
             if ready():
                 break
@@ -130,6 +134,5 @@ if __name__ == '__main__':
         main()
     except Exception as exc:
         print(str(exc), file=sys.stderr)
-        if os.environ.get('DISPLAY'):
-            subprocess.run(['notify-send', 'Inflect could not start', str(exc)], check=False)
+        notify_error('Inflect could not start', str(exc))
         sys.exit(1)

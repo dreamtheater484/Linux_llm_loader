@@ -1,5 +1,4 @@
 """Private application settings, with atomic writes and stale-edit protection."""
-import fcntl
 import hashlib
 import json
 import os
@@ -11,12 +10,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from inflect_access import access_config, lan_interfaces
+from inflect_platform import config_home, lock, replace_file
 from .comfyui import local_url
 
 
 def config_path():
-    return Path(os.environ.get('INFLECT_CONFIG_FILE',
-                str(Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'inflect/config.json')))
+    return Path(os.environ.get('INFLECT_CONFIG_FILE', str(config_home() / 'inflect/config.json')))
 
 
 def read_config():
@@ -95,7 +94,7 @@ def save_preferences(body, active):
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix('.lock').open('a') as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
+        lock(guard)
         current = read_config()
         if revision(current) != body.revision:
             from fastapi import HTTPException
@@ -138,7 +137,7 @@ def write_config(config):
             output.write('\n')
             output.flush()
             os.fsync(output.fileno())
-        temporary.replace(path)  # NamedTemporaryFile creates mode 0600.
+        replace_file(temporary, path)  # NamedTemporaryFile creates mode 0600.
     finally:
         if temporary:
             temporary.unlink(missing_ok=True)

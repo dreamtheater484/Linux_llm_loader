@@ -10,11 +10,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from inflect_platform import hidden
+
 
 async def docker(*args):
     """Bounded CLI call; never invoke a shell or stop an inferred container."""
-    proc = await asyncio.create_subprocess_exec('docker', *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    proc = await asyncio.create_subprocess_exec('docker', *args, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **hidden())
     try:
         out, err = await asyncio.wait_for(proc.communicate(), 25)
     except BaseException:

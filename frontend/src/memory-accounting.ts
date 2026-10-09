@@ -1,4 +1,4 @@
-export type ModelMemory = {resident_bytes:number;anonymous_bytes:number;file_bytes:number;shared_bytes:number;swap_bytes:number;sampled_at:number;pid:number};
+export type ModelMemory = {resident_bytes:number;anonymous_bytes:number;file_bytes:number;shared_bytes:number|null;swap_bytes:number|null;sampled_at:number;pid:number;accounting?:string};
 export type Ram = {used_bytes:number;total_bytes:number;free_bytes:number;available_bytes:number;cache_bytes:number;non_cache_bytes:number;accounting?:string};
 const nonnegative=(value:unknown):value is number=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
 
@@ -15,7 +15,10 @@ export function memoryBreakdown(ram:Ram|undefined, model:ModelMemory|undefined, 
     // resident file-backed model pages as reclaimable. Reserve those pages too.
     // Subtract all model file PSS conservatively: locked/shared file pages and
     // kernel reserves can make this underestimate headroom. It is not a fit guarantee.
-    availableBytes=Math.max(0,Math.min(ram!.total_bytes-modelBytes,ram!.available_bytes-fileBytes));
+    // Windows counts only free and standby pages as available; mapped pages in the
+    // engine's working set are already excluded, so nothing is reserved twice.
+    const reserved=model?.accounting==='process_tree_working_set'?0:fileBytes;
+    availableBytes=Math.max(0,Math.min(ram!.total_bytes-modelBytes,ram!.available_bytes-reserved));
   }
   return {modelBytes,availableBytes};
 }

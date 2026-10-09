@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 import struct
 from unittest.mock import patch
@@ -53,7 +54,7 @@ def test_missing_shards_prevent_load():
 def test_exl_config_maps_capacity_vision_cache_prediction_and_ram(tmp_path):
     with patch('loader.engines.validate', return_value='exl3'):
         args, env, config = launch(Settings(model_id='test', prediction='mtp'), model(), tmp_path, 5050, 'test-key')
-    assert config['model']['model_dir'] == '/models with spaces'
+    assert config['model']['model_dir'] == str(Path('/models with spaces'))
     assert config['model']['max_seq_len'] == config['model']['cache_size'] == 262144
     assert config['model']['vision'] is True
     assert config['model']['cache_mode'] == 'Q8'
@@ -63,11 +64,28 @@ def test_exl_config_maps_capacity_vision_cache_prediction_and_ram(tmp_path):
     assert env['EXL3_HOST_MEM_RESERVE_MB'] == '16384'
     assert config['network']['allowed_origins'] == []
     assert config['network']['api_servers'] == ['oai']
-    assert (tmp_path / 'api_tokens.yml').stat().st_mode & 0o777 == 0o600
+    if os.name != 'nt':  # Windows protects the state folder with per-user ACLs, not mode bits.
+        assert (tmp_path / 'api_tokens.yml').stat().st_mode & 0o777 == 0o600
     assert str(tmp_path / 'config.yml') in args
     with patch('loader.engines.validate', return_value='exl3'):
         _, _, streamed = launch(Settings(model_id='test', ngram_ram=False), model(), tmp_path, 5051, 'test-key')
     assert streamed['model']['ngram_ram'] is False
+
+
+@pytest.mark.parametrize('windows,large_pages,arena', [(False, False, '1'), (False, True, '1'),
+                                                        (True, False, '1'), (True, True, '0')])
+def test_expert_arena_uses_large_pages_when_windows_grants_them(tmp_path, monkeypatch, windows, large_pages, arena):
+    import loader.engines as engines
+    monkeypatch.delenv('EXL3_MOE_PINNED_ARENA', raising=False)
+    monkeypatch.setattr(engines, 'WINDOWS', windows)
+    monkeypatch.setattr(engines, 'large_pages_available', lambda: large_pages)
+    with patch('loader.engines.validate', return_value='exl3'):
+        _, env, _ = launch(Settings(model_id='test'), model(), tmp_path, 5050, 'test-key')
+    assert env['EXL3_MOE_PINNED_ARENA'] == arena
+    monkeypatch.setenv('EXL3_MOE_PINNED_ARENA', '1')  # An explicit choice always wins.
+    with patch('loader.engines.validate', return_value='exl3'):
+        _, env, _ = launch(Settings(model_id='test'), model(), tmp_path, 5051, 'test-key')
+    assert env['EXL3_MOE_PINNED_ARENA'] == '1'
 
 
 def test_gpu_metrics_keep_units_and_unavailable_values():
@@ -81,7 +99,12 @@ def test_gpu_metrics_keep_units_and_unavailable_values():
     assert unknown['used_bytes'] is None
 
 
-def test_cpu_power_rapl_package_delta_wrap_and_no_core_double_count(tmp_path):
+LINUX_SYSFS = pytest.mark.skipif(os.name == 'nt', reason='Linux sysfs fixture (":" is not valid in Windows names)')
+
+
+@LINUX_SYSFS
+def test_cpu_power_rapl_package_delta_wrap_and_no_core_double_count(tmp_path, monkeypatch):
+    monkeypatch.setattr('loader.metrics.WINDOWS', False)
     def zone(name, label, energy):
         root = tmp_path / 'class/powercap' / name
         root.mkdir(parents=True)
@@ -101,7 +124,8 @@ def test_cpu_power_rapl_package_delta_wrap_and_no_core_double_count(tmp_path):
     assert power.sample(14)['watts'] is None
 
 
-def test_cpu_power_only_uses_qualified_amd_package_sensor(tmp_path):
+def test_cpu_power_only_uses_qualified_amd_package_sensor(tmp_path, monkeypatch):
+    monkeypatch.setattr('loader.metrics.WINDOWS', False)
     sensor = tmp_path / 'class/hwmon/hwmon4'
     (sensor / 'device').mkdir(parents=True)
     (sensor / 'name').write_text('amdgpu')
